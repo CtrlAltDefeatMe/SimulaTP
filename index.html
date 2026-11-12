@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#273458">
+  <meta name="description" content="SimulaTP is a transfer pricing training simulator.">
+  <title>SimulaTP · 2027 simulation</title>
+  <link rel="icon" href="./assets/th-monogram-nav.png" type="image/png">
+  <link rel="stylesheet" href="./src/styles.css">
+  <link rel="stylesheet" href="./src/pricing.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Application navigation">
+      <a class="brand" href="#dashboard" aria-label="SimulaTP dashboard">
+        <span class="brand-mark" aria-hidden="true"><img src="./assets/th-monogram-nav.png" width="42" height="42" alt=""></span>
+        <span class="brand-wordmark"><strong>SimulaTP</strong><span>Transfer pricing simulator</span></span>
+      </a>
+      <nav class="navigation" aria-label="Main">
+        <button type="button" data-view="dashboard" class="nav-button" aria-current="page">Dashboard</button>
+        <button type="button" data-view="map" class="nav-button">Transaction map</button>
+        <button type="button" data-view="pricing" class="nav-button">Goods transfer prices</button>
+        <button type="button" data-view="settings" class="nav-button">Scenario settings</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="avatar" aria-hidden="true">S</span>
+        <div><strong>Simulator</strong><small>2027 simulation</small></div>
+      </div>
+    </aside>
+    <main class="workspace" id="main">
+      <header class="page-header" id="page-header">
+        <div><p class="breadcrumb">Simulation <span>/</span> FY 2027</p><h1>2027 performance</h1></div>
+      </header>
+      <div class="page-body" id="page-body">
+        <div class="panel loading">Loading SimulaTP…</div>
+      </div>
+    </main>
+  </div>
+  <div id="announcement" role="status" class="visually-hidden" aria-live="polite"></div>
+  <noscript>This simulation needs JavaScript enabled.</noscript>
+  <script type="module" src="./src/main.mjs"></script>
+</body>
+</html>

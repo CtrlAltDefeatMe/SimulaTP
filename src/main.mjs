@@ -1,0 +1,881 @@
+import { applyGoodsPrices, createConfig, ENTITIES, POLICY_LABELS, PRODUCTS, quarterPricingMonth, reviewGoodsPricing, runYear } from './engine.mjs';
+import { landPolygons } from './land.mjs';
+import { pricingStatus, readGoodsPriceOverrides, renderGoodsPricing, useGoodsPriceQuote } from './pricing-view.mjs';
+import { SHOCK_KEYS } from './simulation.mjs';
+
+const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const storageKey = 'simulatp-2027-v1';
+const pageHeader = document.querySelector('#page-header');
+const pageBody = document.querySelector('#page-body');
+const announcement = document.querySelector('#announcement');
+const navButtons = [...document.querySelectorAll('[data-view]')];
+const formatAmount = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+const formatCompactAmount = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 2 });
+const formatNumber = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+const formatPercent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const formatDifference = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const iconPaths = {
+  dashboard: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  map: '<path d="M4 4l5-2 6 3 5-2v16l-5 2-6-3-5 2zM9 2v16m6-13v16"/>',
+  pricing: '<path d="M3 5h10l8 8-8 8-10-10z"/><circle cx="7.5" cy="9" r="1"/>',
+  settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="currentColor"/><circle cx="15" cy="17" r="2.5" fill="currentColor"/>',
+  next: '<path d="M5 12h13m-6-6 6 6-6 6"/>',
+};
+const views = { dashboard: '2027 performance', map: 'Transaction map', pricing: 'Goods transfer prices', settings: 'Scenario settings' };
+const categoryLabels = { goods: 'Tangible goods', royalty: 'Royalty', services: 'Services' };
+const categoryColors = { goods: '#4e73a0', royalty: '#92612e', services: '#227466' };
+const shockLabels = { demand: 'Demand', salesPrice: 'Sales price', materialCost: 'Material input cost' };
+
+function icon(name) {
+  return `<span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${iconPaths[name]}</svg></span>`;
+}
+
+function html(value) {
+  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+function amount(value, formatter = formatAmount) {
+  return Number.isFinite(value) ? formatter.format(value) : '—';
+}
+
+function signed(value, formatter = formatAmount) {
+  if (!Number.isFinite(value)) return '—';
+  return `${value > 0 ? '+' : ''}${formatter.format(Object.is(value, -0) ? 0 : value)}`;
+}
+
+function varianceClass(value) {
+  if (value > 0) return 'positive';
+  if (value < 0) return 'negative';
+  return '';
+}
+
+function signedPoints(value) {
+  return Number.isFinite(value) ? `${signed(value * 100, formatDifference)} pp` : '—';
+}
+
+function labelFor(id) {
+  return ENTITIES[id]?.name ?? id;
+}
+
+function productFor(id) {
+  return PRODUCTS[id]?.name ?? PRODUCTS[id]?.label ?? id;
+}
+
+function loadState() {
+  const defaults = createConfig();
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey));
+    if (saved?.config && Number.isInteger(saved.revealed) && saved.revealed >= 0 && saved.revealed <= 12) {
+      const { config, revealed } = saved;
+      const unstarted = revealed === 0 && !config.goodsPriceSchedule?.length;
+      const restored = unstarted && config.startingPriceMethod === undefined
+        ? { ...config, startingPriceMethod: defaults.startingPriceMethod } : config;
+      return { config: restored, year: runYear(restored), revealed };
+    }
+  } catch {
+    // A malformed or outdated saved scenario should still let the dashboard open.
+  }
+  return { config: defaults, year: runYear(defaults), revealed: 0 };
+}
+
+function storeState() {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify({ config: state.config, revealed: state.revealed }));
+  } catch {
+    // Scenario controls also work for the current page when local storage is unavailable.
+  }
+}
+
+function viewFromHash() {
+  const key = location.hash.slice(1);
+  return Object.hasOwn(views, key) ? key : 'dashboard';
+}
+
+const initial = loadState();
+const state = {
+  ...initial,
+  view: viewFromHash(),
+  period: Math.max(0, initial.revealed - 1),
+  metric: 'operatingProfit',
+  filter: 'all',
+  mapEntity: null,
+  mapBasis: initial.revealed ? 'actual' : 'budget',
+  settingsMessage: '',
+  pricingMessage: '',
+};
+
+function revealButton() {
+  if (state.revealed >= 12) return '<button class="button" disabled>All actuals revealed</button>';
+  return `<button class="button primary" type="button" data-action="reveal">Reveal ${months[state.revealed]} actuals ${icon('next')}</button>`;
+}
+
+function renderHeader() {
+  const reviewButton = quarterPricingMonth(state.revealed)
+    ? '<button class="button" type="button" data-action="review-prices">Review transfer prices</button>'
+    : '';
+  pageHeader.innerHTML = `
+    <div>
+      <p class="breadcrumb">Simulation <span aria-hidden="true">/</span> FY 2027</p>
+      <h1 id="page-title" tabindex="-1">${views[state.view]}</h1>
+    </div>
+    ${state.view === 'dashboard' ? `<div class="view-controls">${reviewButton}${revealButton()}</div>` : ''}`;
+  document.title = `SimulaTP · ${views[state.view]}`;
+}
+
+function monthStrip() {
+  const buttons = shortMonths.map((month, index) => `
+    <button type="button" class="month-button ${index < state.revealed ? 'revealed' : ''}" data-period="${index}" aria-label="${months[index]}, ${index < state.revealed ? 'actuals available' : 'budget available'}" aria-pressed="${state.period === index}">
+      ${month}<span class="month-status" aria-hidden="true">${index < state.revealed ? 'Actuals' : 'Budget'}</span>
+    </button>`).join('');
+  return `<section class="panel month-panel" aria-label="Select a reporting month">
+    <div class="month-panel-top">
+      <strong>Reporting calendar</strong>
+      <span class="progress-count">${state.revealed} of 12 actual months revealed</span>
+    </div>
+    <div class="month-strip">${buttons}</div>
+  </section>`;
+}
+
+function kpis(budget, actual) {
+  const stats = [
+    { label: 'Net sales', key: 'revenue' },
+    { label: 'Gross profit', key: 'grossProfit' },
+    { label: 'Operating profit', key: 'operatingProfit' },
+    { label: 'Operating margin', key: 'operatingMargin', isMargin: true },
+  ];
+  const get = (pnl, key) => key === 'grossProfit' ? pnl.revenue - pnl.cogs : pnl[key];
+  return `<section class="kpi-grid" aria-label="${months[state.period]} consolidated KPIs">
+    ${stats.map(({ label, key, isMargin }) => {
+      const base = get(budget, key);
+      const value = actual ? get(actual, key) : base;
+      const display = isMargin ? formatPercent : formatCompactAmount;
+      const diff = value - base;
+      return `<div class="panel kpi">
+        <p class="kpi-label">${label}</p>
+        <strong class="kpi-number" title="${amount(value, isMargin ? formatPercent : formatAmount)}">${amount(value, display)}</strong>
+        <p class="kpi-footer">${actual
+          ? `<strong class="${varianceClass(diff)}">${isMargin ? signedPoints(diff) : signed(diff, formatCompactAmount)}</strong> vs ${amount(base, display)} budget`
+          : 'Budget'} · ${shortMonths[state.period]}</p>
+      </div>`;
+    }).join('')}
+  </section>`;
+}
+
+function chart() {
+  const { budget, actual } = state.year;
+  const metric = state.metric;
+  const options = { operatingProfit: 'Operating profit', revenue: 'Net sales' };
+  const values = [...budget, ...actual.slice(0, state.revealed)].map((month) => month.consolidated[metric]);
+  const highest = Math.max(1, ...values);
+  const lowest = Math.min(0, ...values);
+  const range = (highest - lowest) / 4;
+  const scale = 10 ** Math.floor(Math.log10(range));
+  const step = Math.ceil(range / scale) * scale;
+  const top = Math.ceil(highest / step) * step;
+  const bottom = Math.floor(lowest / step) * step;
+  const ticks = Array.from({ length: 5 }, (_, i) => top - i * ((top - bottom) / 4));
+  const percent = (value) => (value - bottom) / (top - bottom) * 100;
+  const bar = (value, classes) => `<span class="bar ${classes} ${value < 0 ? 'down' : ''}" data-bottom="${percent(Math.min(0, value))}" data-height="${Math.abs(percent(value) - percent(0))}"></span>`;
+  return `<section class="panel" aria-labelledby="chart-heading">
+    <div class="panel-header">
+      <div><h2 id="chart-heading">Monthly performance</h2><p class="subtitle">Consolidated · USD</p></div>
+      <div class="view-controls">
+        <div class="legend" aria-label="Series">
+          <span class="legend-item"><i class="swatch"></i>Budget</span>
+          <span class="legend-item"><i class="swatch actual"></i>Actual</span>
+        </div>
+        <div class="segmented" aria-label="Chart metric">
+          ${Object.entries(options).map(([key, label]) => `<button type="button" data-metric="${key}" aria-pressed="${key === metric}">${label}</button>`).join('')}
+        </div>
+      </div>
+    </div>
+    <div class="chart-scroll">
+      <div class="chart" role="group" aria-label="Monthly ${options[metric].toLowerCase()} chart">
+        <div class="chart-axis" aria-hidden="true">${ticks.map((value) => `<span>${amount(value, formatCompactAmount)}</span>`).join('')}</div>
+        <div class="chart-plot">
+          <i class="zero-line" data-bottom="${percent(0)}" aria-hidden="true"></i>
+          ${budget.map((month, index) => {
+            const base = month.consolidated[metric];
+            const realized = index < state.revealed ? actual[index].consolidated[metric] : null;
+            const label = `${months[index]} budget ${amount(base)}${realized === null ? '' : `, actual ${amount(realized)}`}`;
+            return `<button type="button" class="bar-group" aria-pressed="${index === state.period}" data-period="${index}" aria-label="${label}" title="${label}">
+              ${bar(base, realized === null ? '' : 'paired')}${realized === null ? '' : bar(realized, 'actual')}
+            </button>`;
+          }).join('')}
+        </div>
+        <div class="chart-labels" aria-hidden="true">${shortMonths.map((month, index) => `<span class="chart-label ${state.period === index ? 'selected' : ''}">${month}</span>`).join('')}</div>
+      </div>
+    </div>
+  </section>`;
+}
+
+function annualTable() {
+  return `<section class="panel" aria-labelledby="annual-heading">
+    <div class="panel-header"><div><h2 id="annual-heading">12-month budget and actuals</h2><p class="subtitle">Consolidated · USD</p></div></div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th scope="col">Month</th><th scope="col">Budget sales</th><th scope="col">Actual sales</th><th scope="col">Budget profit</th><th scope="col">Actual profit</th><th scope="col">Profit variance</th><th scope="col">Budget margin</th><th scope="col">Actual margin</th></tr></thead>
+        <tbody>
+          ${state.year.budget.map(({ consolidated: budget }, index) => {
+            const actual = index < state.revealed ? state.year.actual[index].consolidated : null;
+            const variance = actual ? actual.operatingProfit - budget.operatingProfit : null;
+            return `<tr class="${index === state.period ? 'selected-row' : ''}">
+              <td><button class="table-select" type="button" data-period="${index}" aria-pressed="${index === state.period}">${months[index]}</button></td>
+              <td>${amount(budget.revenue)}</td><td>${amount(actual?.revenue)}</td>
+              <td>${amount(budget.operatingProfit)}</td><td>${amount(actual?.operatingProfit)}</td>
+              <td class="${varianceClass(variance)}">${signed(variance)}</td>
+              <td>${amount(budget.operatingMargin, formatPercent)}</td><td>${amount(actual?.operatingMargin, formatPercent)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+function metricList(rows) {
+  return `<ul class="detail-list">${rows.map(([label, value]) => `<li><span>${html(label)}</span><strong>${html(value)}</strong></li>`).join('')}</ul>`;
+}
+
+function variancePanel(bridge) {
+  const labels = {
+    revenue: 'Net sales variance',
+    volume: 'Volume and mix',
+    salesPrice: 'Sales price',
+    materials: 'Material input costs',
+    otherCogs: 'Other cost of goods sold',
+    operatingExpenses: 'Operating expenses',
+    operatingProfit: 'Operating profit variance',
+    operatingMargin: 'Operating margin variance',
+    check: 'Unexplained difference',
+  };
+  return `<section class="panel breakdown" aria-labelledby="bridge-heading">
+    <div class="panel-header"><div><h2 id="bridge-heading">Variance bridge</h2><p class="subtitle">${months[state.period]} · actual vs budget</p></div></div>
+    ${bridge ? metricList(Object.entries(labels).filter(([key]) => Number.isFinite(bridge[key])).map(([key, label]) => [
+      label, key === 'operatingMargin' ? signedPoints(bridge[key]) : signed(bridge[key], key === 'check' ? formatDifference : formatAmount),
+    ])) : '<p class="empty-state">Release this month’s actuals to see its variance bridge.</p>'}
+  </section>`;
+}
+
+function entityPanel(budget, actual) {
+  const pnl = actual ?? budget;
+  const labels = [
+    ['revenue', 'Net sales'],
+    ['cogs', 'Cost of goods sold'],
+    ['otherOperatingExpenses', 'Other operating expenses'],
+    ['rdExpense', 'R&D expense'],
+    ['operatingProfit', 'Operating profit'],
+    ['operatingMargin', 'Operating margin'],
+  ];
+  return `<section class="panel" aria-labelledby="entity-heading">
+    <div class="panel-header"><div><h2 id="entity-heading">Entity results</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD</p></div></div>
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="entity-heading"><table>
+      <thead><tr><th scope="col">Entity</th>${labels.map(([, label]) => `<th scope="col">${html(label)}</th>`).join('')}</tr></thead>
+      <tbody>${[['Consolidated', pnl.consolidated], ...Object.entries(pnl.entities)].map(([id, row]) => `
+        <tr>
+          <td class="table-name">${html(labelFor(id))}</td>
+          ${labels.map(([key]) => `<td>${amount(row[key], key === 'operatingMargin' ? formatPercent : formatAmount)}</td>`).join('')}
+        </tr>`).join('')}
+      </tbody>
+    </table></div>
+  </section>`;
+}
+
+function controlPanels(budget, actual) {
+  const { capacity, reconciliation } = actual ?? budget;
+  const reconciliationNames = {
+    ledgerDifference: 'Transaction ledger',
+    intercompanyDifference: 'Intercompany balances',
+    profitDifference: 'Consolidated profit',
+    inventoryDifference: 'Inventory roll-forward',
+  };
+  const capacityRows = Object.entries(capacity).map(([id, entry]) => [
+    labelFor(id),
+    `${amount(entry.used, formatNumber)} of ${amount(entry.limit, formatNumber)} units`,
+  ]);
+  return `<div class="detail-stack">
+    <section class="panel breakdown" aria-labelledby="capacity-heading">
+      <div class="panel-header"><h2 id="capacity-heading">Production capacity</h2></div>${metricList(capacityRows)}
+    </section>
+    <section class="panel breakdown" aria-labelledby="reconcile-heading">
+      <div class="panel-header"><div><h2 id="reconcile-heading">Reconciliation</h2><p class="subtitle">Control differences · USD</p></div></div>
+      ${metricList(Object.entries(reconciliationNames).filter(([key]) => Number.isFinite(reconciliation[key])).map(([key, label]) => [label, amount(reconciliation[key], formatDifference)]))}
+    </section>
+  </div>`;
+}
+
+function renderDashboard() {
+  const budget = state.year.budget[state.period];
+  const actual = state.period < state.revealed ? state.year.actual[state.period] : null;
+  const bridge = actual ? state.year.variance[state.period] : null;
+  pageBody.innerHTML = `
+    ${monthStrip()}
+    ${kpis(budget.consolidated, actual?.consolidated)}
+    ${chart()}
+    ${entityPanel(budget, actual)}
+    <div class="dashboard-detail">${variancePanel(bridge)}${controlPanels(budget, actual)}</div>
+    ${annualTable()}
+    ${inventoryPanel(budget, actual)}`;
+  for (const element of pageBody.querySelectorAll('[data-bottom]')) {
+    element.style.bottom = `${element.dataset.bottom}%`;
+    if (element.dataset.height !== undefined) element.style.height = `${element.dataset.height}%`;
+  }
+}
+
+function inventoryPanel(budget, actual) {
+  const { inventory } = actual ?? budget;
+  const stages = { raw: 'Raw materials', wip: 'Work in process', finished: 'Finished goods' };
+  const units = (lots) => amount(lots.reduce((total, lot) => total + lot.quantity, 0), formatNumber);
+  const value = (lots) => amount(lots.reduce((total, lot) => total + lot.quantity * lot.unitValue, 0));
+  return `<section class="panel" aria-labelledby="inventory-heading">
+    <div class="panel-header"><div><h2 id="inventory-heading">FIFO inventory roll-forward</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · units and local carrying value in USD</p></div></div>
+    <div class="table-scroll"><table>
+      <thead><tr><th scope="col">Owner</th><th scope="col">Custodian</th><th scope="col">Product family</th><th scope="col">Stage</th><th scope="col">Opening</th><th scope="col">Receipts</th><th scope="col">Issues</th><th scope="col">Closing</th><th scope="col">Closing value</th></tr></thead>
+      <tbody>${inventory.map((bin) => `<tr>
+        <td class="table-name">${html(labelFor(bin.owner))}</td><td>${html(labelFor(bin.custodian))}</td>
+        <td>${html(productFor(bin.product))}</td><td>${html(stages[bin.stage] ?? bin.stage)}</td>
+        <td>${units(bin.opening)}</td><td>${units(bin.receipts)}</td><td>${units(bin.issues)}</td><td>${units(bin.closing)}</td><td>${value(bin.closing)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  </section>`;
+}
+
+const mapNodes = {
+  US: { position: [19, 49], coordinates: [-97, 38], manufacturing: true },
+  CA: { position: [17, 14], coordinates: [-106, 56] },
+  UK: { position: [37, 12], coordinates: [-1, 52] },
+  BE: { position: [51, 9], coordinates: [4.4, 50.8] },
+  DE: { position: [64, 12], coordinates: [10, 51] },
+  PL: { position: [67, 29], coordinates: [19, 52], manufacturing: true },
+  CH: { position: [49, 44], coordinates: [8, 47] },
+  FR: { position: [35, 31], coordinates: [2.3, 46.6] },
+  IN: { position: [84, 36], coordinates: [78, 22] },
+  APAC: { position: [84, 64], coordinates: [103.8, 1.35] },
+  UNRELATED: { position: [49, 69] },
+  THIRD_PARTY: { position: [31, 86] },
+};
+const mapRole = {
+  US: 'Manufacturer · IP · HQ',
+  CH: 'European principal',
+  PL: 'Toll manufacturing',
+  BE: 'Warehouse operator',
+  DE: 'Limited-risk distributor',
+  FR: 'Limited-risk distributor',
+  UK: 'Limited-risk distributor',
+  APAC: 'Full-fledged distributor',
+  CA: 'Full-fledged distributor',
+  IN: 'Shared services',
+  UNRELATED: 'Swiss direct customer',
+  THIRD_PARTY: 'External sales',
+};
+const manufacturingIcon = '<svg class="map-factory-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21V11l6-4v4l6-4v4h3l1-7h2l1 8v9H3zm4-5h1m4 0h1m4 0h1"/></svg>';
+
+function mapLabel(id) {
+  return id === 'THIRD_PARTY' ? 'Third-party customers' : labelFor(id);
+}
+
+function mapProjection(lon, lat, width, height) {
+  return [(lon + 180) / 360 * width, (84 - lat) / 144 * height];
+}
+
+function mapGoodsRoute(transaction) {
+  if (transaction.category !== 'goods' || !transaction.quantity) return '';
+  const from = transaction.from === 'CH' ? 'BE' : transaction.from;
+  const to = transaction.to === 'CH' ? 'BE' : transaction.to;
+  return `${mapLabel(from)} → ${mapLabel(to)}`;
+}
+
+function mapEdges(transactions) {
+  const edges = new Map();
+  function add(from, to, category, weight) {
+    const key = [from, to, category].join('/');
+    const edge = edges.get(key) ?? { from, to, category, weight: 0 };
+    edge.weight += Math.abs(weight);
+    edges.set(key, edge);
+  }
+  for (const transaction of transactions) {
+    const { from, to, category, amount: total, quantity, policy } = transaction;
+    if (category === 'goods') {
+      if (quantity) add(from === 'CH' ? 'BE' : from, to === 'CH' ? 'BE' : to, category, quantity);
+    } else {
+      if (total && (state.filter === 'all' || state.filter === category)) add(from, to, category, total);
+      if (policy === 'PL_TOLL_BUDGET' && ['all', 'goods'].includes(state.filter) && quantity) add('PL', 'BE', 'goods', quantity);
+    }
+  }
+  return [...edges.values()].filter(({ from, to }) => mapNodes[from] && mapNodes[to]);
+}
+
+function drawMap() {
+  const canvas = document.querySelector('#transaction-canvas');
+  if (!canvas) return;
+  const stage = canvas.parentElement;
+  const width = stage.clientWidth;
+  const height = stage.clientHeight;
+  const ratio = devicePixelRatio || 1;
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(ratio, ratio);
+  for (const polygon of landPolygons) {
+    ctx.beginPath();
+    for (const ring of polygon) {
+      for (const [index, [lon, lat]] of ring.entries()) {
+        const [x, y] = mapProjection(lon, lat, width, height);
+        if (index) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+    }
+    ctx.fillStyle = '#e6eef7';
+    ctx.fill('evenodd');
+    ctx.strokeStyle = '#d0deed';
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+  }
+  const boxes = Object.fromEntries([...stage.querySelectorAll('[data-map-entity]')].map((node) => {
+    const id = node.dataset.mapEntity;
+    const { position: [left, top], coordinates } = mapNodes[id];
+    const x = left * width / 100;
+    const y = top * height / 100;
+    if (coordinates) {
+      const [mapX, mapY] = mapProjection(...coordinates, width, height);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(mapX, mapY);
+      ctx.strokeStyle = '#7c94b2';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(mapX, mapY, 2.3, 0, 2 * Math.PI);
+      ctx.fillStyle = '#526f95';
+      ctx.fill();
+    }
+    return [id, { x, y, halfW: node.offsetWidth / 2 + 2, halfH: node.offsetHeight / 2 + 2 }];
+  }));
+  for (const edge of mapEdges(mapTransactions({ forMap: true }))) {
+    const { from, to, category, weight } = edge;
+    const start = boxes[from];
+    const end = boxes[to];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 1) continue;
+    const curves = { goods: 0.17, royalty: 0.28, services: -0.24 };
+    const bend = curves[category] * Math.min(distance, 400);
+    const cx = (start.x + end.x) / 2 - dy / distance * bend;
+    const cy = (start.y + end.y) / 2 + dx / distance * bend;
+    const takeoff = Math.min(start.halfW / Math.abs(cx - start.x), start.halfH / Math.abs(cy - start.y), 0.9);
+    const landing = Math.min(end.halfW / Math.abs(cx - end.x), end.halfH / Math.abs(cy - end.y), 0.9);
+    const x1 = start.x + (cx - start.x) * takeoff;
+    const y1 = start.y + (cy - start.y) * takeoff;
+    const x2 = end.x + (cx - end.x) * landing;
+    const y2 = end.y + (cy - end.y) * landing;
+    const thickness = 1.15 + Math.min(Math.log10(weight || 1) * 0.19, 0.9);
+    ctx.globalAlpha = state.mapEntity ? 0.93 : 0.77;
+    ctx.strokeStyle = categoryColors[category];
+    ctx.lineWidth = thickness;
+    ctx.setLineDash(category === 'royalty' ? [6, 4] : category === 'services' ? [2, 4] : []);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.quadraticCurveTo(cx, cy, x2, y2);
+    ctx.stroke();
+    ctx.fillStyle = categoryColors[category];
+    const angle = Math.atan2(y2 - cy, x2 - cx);
+    const arrow = 6;
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - arrow * Math.cos(angle - 0.45), y2 - arrow * Math.sin(angle - 0.45));
+    ctx.lineTo(x2 - arrow * Math.cos(angle + 0.45), y2 - arrow * Math.sin(angle + 0.45));
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function mapTransactions({ forMap = false, entity = state.mapEntity } = {}) {
+  const month = state.year[state.mapBasis][state.period];
+  return month.transactions.filter((transaction) => {
+    const { category, from, to, policy } = transaction;
+    const isToll = forMap && policy === 'PL_TOLL_BUDGET';
+    if (state.filter !== 'all' && state.filter !== category && !(isToll && state.filter === 'goods')) return false;
+    if (!entity || entity === from || entity === to) return true;
+    if (category === 'goods' && entity === 'BE' && (from === 'CH' || to === 'CH')) return true;
+    return isToll && entity === 'BE';
+  });
+}
+
+function mapTable(transactions) {
+  if (!transactions.length) return '<p class="empty-state">There are no matching transactions for this month.</p>';
+  return `<div class="table-scroll"><table aria-label="Transaction ledger">
+    <thead><tr><th scope="col">Transaction</th><th scope="col">From → to</th><th scope="col">Product family</th><th scope="col">Goods route</th><th scope="col">Units</th><th scope="col">USD per unit</th><th scope="col">Amount</th></tr></thead>
+    <tbody>${transactions.map((transaction) => {
+      const { from, to, category, policy, product, quantity, amount: total, external } = transaction;
+      const unitPrice = category === 'goods' && quantity && !external ? amount(total / quantity) : '—';
+      return `<tr>
+        <td><span class="legend-item"><i class="swatch ${html(category)}"></i></span> <span class="table-name">${html(POLICY_LABELS[policy] ?? policy)}</span></td>
+        <td>${html(mapLabel(from))} → ${html(mapLabel(to))}</td>
+        <td>${html(productFor(product) || '—')}</td><td>${html(mapGoodsRoute(transaction) || '—')}</td>
+        <td>${quantity ? amount(quantity, formatNumber) : '—'}</td><td>${unitPrice}</td><td>${amount(total)}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderMap() {
+  if (state.period >= state.revealed) state.mapBasis = 'budget';
+  const filters = { all: 'All flows', ...categoryLabels };
+  let visibleNodes = Object.entries(mapNodes);
+  if (state.filter !== 'all') {
+    const matching = mapTransactions({ forMap: true, entity: null });
+    const participants = new Set();
+    for (const { from, to, quantity, amount: total } of matching) {
+      if (!quantity && !total) continue;
+      participants.add(from);
+      participants.add(to);
+    }
+    // The legal parties and the actual shipment endpoints can differ.
+    for (const { from, to } of mapEdges(matching)) {
+      participants.add(from);
+      participants.add(to);
+    }
+    if (!participants.has(state.mapEntity)) state.mapEntity = null;
+    visibleNodes = visibleNodes.filter(([id]) => participants.has(id));
+  }
+  const transactions = mapTransactions();
+  pageBody.innerHTML = `
+    <section class="panel" aria-labelledby="map-heading">
+      <div class="panel-header">
+        <div><h2 id="map-heading">Entities and flows</h2><p class="subtitle">Select an entity to view its transactions.</p></div>
+        <div class="segmented" aria-label="Flow category">
+          ${Object.entries(filters).map(([key, label]) => `<button type="button" data-filter="${key}" aria-pressed="${state.filter === key}">${label}</button>`).join('')}
+        </div>
+      </div>
+      <div class="map-tools">
+        <div class="view-controls">
+          <label class="field">Month<select data-map-period>${months.map((month, index) => `<option value="${index}" ${state.period === index ? 'selected' : ''}>${month}</option>`).join('')}</select></label>
+          <label class="field">Results<select data-map-basis><option value="budget">Budget</option><option value="actual" ${state.period < state.revealed ? '' : 'disabled'} ${state.mapBasis === 'actual' ? 'selected' : ''}>Actuals</option></select></label>
+        </div>
+        <div class="legend" aria-label="Flow legend">
+          ${Object.entries(categoryLabels).map(([key, label]) => `<span class="legend-item"><i class="swatch ${key}"></i>${label}</span>`).join('')}
+        </div>
+      </div>
+      <div class="map-scroll">
+        <div class="map-stage">
+          <canvas id="transaction-canvas" aria-hidden="true"></canvas>
+          ${visibleNodes.map(([id, { manufacturing }]) => `<button type="button" data-map-entity="${id}" class="map-node ${id === 'US' || id === 'CH' ? 'principal' : ''} ${state.mapEntity && state.mapEntity !== id ? 'muted' : ''}" aria-pressed="${state.mapEntity === id}"><strong class="map-node-title">${html(mapLabel(id))}${manufacturing ? manufacturingIcon : ''}</strong><span>${mapRole[id]}</span></button>`).join('')}
+        </div>
+        <p class="map-credit">Goods arrows follow shipment routes. Asia and India markers are illustrative. <a href="https://www.naturalearthdata.com/downloads/110m-physical-vectors/110m-land/" target="_blank" rel="noopener noreferrer">Natural Earth</a></p>
+      </div>
+    </section>
+    <section class="panel" aria-labelledby="flows-heading">
+      <div class="panel-header">
+        <div><h2 id="flows-heading">${state.mapEntity ? html(mapLabel(state.mapEntity)) : 'Transaction ledger'}</h2><p class="subtitle">${months[state.period]} · ${state.mapBasis === 'budget' ? 'Budget' : 'Actual'} · ${transactions.length} ${transactions.length === 1 ? 'transaction' : 'transactions'} · USD</p></div>
+        ${state.mapEntity ? '<button type="button" class="button" data-action="clear-map-entity">Clear entity filter</button>' : ''}
+      </div>
+      ${mapTable(transactions)}
+    </section>`;
+  for (const node of document.querySelectorAll('[data-map-entity]')) {
+    const [left, top] = mapNodes[node.dataset.mapEntity].position;
+    node.style.left = `${left}%`;
+    node.style.top = `${top}%`;
+  }
+  drawMap();
+}
+
+const policyFields = [
+  ['lrdMargin', 'European LRD target operating margin'],
+  ['ffdMargin', 'Asian and Canadian FFD target operating margin'],
+  ['polandMarkup', 'Poland toll cost-plus markup'],
+  ['belgiumMargin', 'Belgium warehouse target operating margin'],
+  ['usServicesMarkup', 'US headquarters services markup'],
+  ['indiaServicesMarkup', 'India shared services markup'],
+  ['usToSwissMarkup', 'US → Swiss cross-supply markup'],
+  ['swissToUsMarkup', 'Swiss → US cross-supply markup'],
+];
+
+const correlationPairs = [[0, 1], [0, 2], [1, 2]];
+const distributionColumns = [['min', 'Minimum'], ['mode', 'Most likely'], ['max', 'Maximum']];
+
+function numberInput(name, value, { min, max, step = 'any', label, disabled = false } = {}) {
+  return `<input type="number" name="${name}" value="${html(value)}" step="${step}" ${min === undefined ? '' : `min="${min}"`} ${max === undefined ? '' : `max="${max}"`} ${label ? `aria-label="${html(label)}"` : ''} ${disabled ? 'disabled' : 'required'}>`;
+}
+
+function percentInput(value) {
+  return Number((value * 100).toFixed(8));
+}
+
+function annualBudgetMargin(budget) {
+  const totals = budget.reduce((year, { consolidated }) => ({
+    revenue: year.revenue + consolidated.revenue,
+    profit: year.profit + consolidated.operatingProfit,
+  }), { revenue: 0, profit: 0 });
+  return totals.profit / totals.revenue;
+}
+
+function rdAllocationLabel(usShare) {
+  const foreignShare = 1 - usShare;
+  return `Germany ${formatPercent.format(foreignShare * 0.60)} · Poland ${formatPercent.format(foreignShare * 0.40)} of total R&D`;
+}
+
+function renderSettings() {
+  const { simulation, capacity, policies, annualOperatingMargin, rd = createConfig().rd } = state.config;
+  const marginLocked = state.revealed > 0;
+  const target = annualOperatingMargin ?? annualBudgetMargin(state.year.budget);
+  pageBody.innerHTML = `
+    <form id="scenario-form" class="settings-form">
+      <section class="panel" aria-labelledby="annual-plan-heading">
+        <div class="panel-header"><div><h2 id="annual-plan-heading">Annual financial plan</h2><p class="subtitle">2027 consolidated budget and R&D assumptions</p></div></div>
+        <div class="form-fields">
+          <div class="scenario-plan-fields">
+            <label class="field">Consolidated target operating margin (%)${numberInput('annualOperatingMargin', percentInput(target), { disabled: marginLocked })}</label>
+            <label class="field">R&amp;D as a share of consolidated sales (%)${numberInput('rd.salesRate', percentInput(rd.salesRate), { min: 0, max: 10 })}</label>
+            <label class="field">US share of R&amp;D (%)${numberInput('rd.usShare', percentInput(rd.usShare), { min: 0, max: 100 })}</label>
+          </div>
+          <p class="field-note">${marginLocked
+            ? 'The margin target is locked once January actuals are revealed. Start a new scenario to change it.'
+            : 'Set the margin before revealing January. The model recalculates goods costs to meet the annual budget target.'}</p>
+          <p class="field-note"><span id="rd-allocation">${rdAllocationLabel(rd.usShare)}</span>. The US funds their work at actual cost plus 10%.</p>
+        </div>
+      </section>
+      <div class="form-grid">
+        <div class="detail-stack">
+          <section class="panel" aria-labelledby="shock-heading">
+            <div class="panel-header"><div><h2 id="shock-heading">Monthly shocks</h2><p class="subtitle">Triangular distributions · percentage changes</p></div></div>
+            <div class="shock-table"><table>
+              <thead><tr><th scope="col">Shock</th>${distributionColumns.map(([, label]) => `<th scope="col">${label}</th>`).join('')}</tr></thead>
+              <tbody>${SHOCK_KEYS.map((key) => `<tr>
+                <td>${shockLabels[key]}</td>
+                ${distributionColumns.map(([bound, label]) => `<td>${numberInput(`shock.${key}.${bound}`, percentInput(simulation.distributions[key][bound]), { min: -100, label: `${shockLabels[key]} ${label.toLowerCase()} (%)` })}</td>`).join('')}
+              </tr>`).join('')}</tbody>
+            </table></div>
+            <div class="form-fields">
+              <label class="field">Simulation seed<input name="seed" value="${html(simulation.seed)}" maxlength="100" required></label>
+            </div>
+          </section>
+          <section class="panel" aria-labelledby="corr-heading">
+            <div class="panel-header"><div><h2 id="corr-heading">Shock correlations</h2><p class="subtitle">Correlation between each pair of underlying shocks</p></div></div>
+            <div class="form-fields">
+              ${correlationPairs.map(([i, j]) => `<label class="field">${shockLabels[SHOCK_KEYS[i]]} and ${shockLabels[SHOCK_KEYS[j]]}${numberInput(`corr.${i}.${j}`, simulation.correlation[i][j], { min: -1, max: 1 })}</label>`).join('')}
+              <p class="field-note">Use coefficients from −1 to 1. All three coefficients must form a valid correlation matrix.</p>
+            </div>
+          </section>
+        </div>
+        <div class="detail-stack">
+          <section class="panel" aria-labelledby="production-heading">
+            <div class="panel-header"><div><h2 id="production-heading">Production capacity</h2><p class="subtitle">Maximum units per month, across all three product families</p></div></div>
+            <div class="form-fields field-pair">
+              ${Object.entries(capacity).map(([id, limit]) => `<label class="field">${html(labelFor(id))}${numberInput(`capacity.${id}`, limit, { min: 0, step: 1 })}</label>`).join('')}
+            </div>
+          </section>
+          <section class="panel" aria-labelledby="pricing-heading">
+            <div class="panel-header"><div><h2 id="pricing-heading">Transfer pricing policies</h2><p class="subtitle">Targets and markups as percentages</p></div></div>
+            <div class="form-fields field-pair">
+              ${policyFields.map(([key, label]) => `<label class="field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max: 100 })}</label>`).join('')}
+            </div>
+          </section>
+          <section class="panel breakdown" aria-labelledby="royalty-heading">
+            <div class="panel-header"><div><h2 id="royalty-heading">Swiss royalty to US</h2><p class="subtitle">${amount(policies.royaltyRate, formatPercent)} of ultimate European LRD third-party net sales plus Swiss direct sales to unrelated distributors. Asian related-party distributor sales are excluded.</p></div></div>
+          </section>
+        </div>
+      </div>
+      <div id="scenario-message" aria-live="polite">${state.settingsMessage ? `<p class="form-message">${html(state.settingsMessage)}</p>` : ''}</div>
+      <div class="panel form-footer">
+        <p class="field-note">Applying a scenario recalculates all 12 months, resets the reveal sequence, and clears saved transfer prices.</p>
+        <div class="view-controls"><button type="button" class="button" data-action="defaults">Restore defaults</button><button class="button primary" type="submit">Apply scenario</button></div>
+      </div>
+    </form>`;
+}
+
+function readSettings(form) {
+  const data = new FormData(form);
+  const config = createConfig();
+  const enteredTarget = data.get('annualOperatingMargin');
+  const previousTarget = state.config.annualOperatingMargin ?? annualBudgetMargin(state.year.budget);
+  const displayedTarget = percentInput(previousTarget);
+  config.annualOperatingMargin = enteredTarget === null || Number(enteredTarget) === displayedTarget
+    ? previousTarget : Number(enteredTarget) / 100;
+  config.rd.salesRate = Number(data.get('rd.salesRate')) / 100;
+  config.rd.usShare = Number(data.get('rd.usShare')) / 100;
+  config.simulation.seed = String(data.get('seed')).trim();
+  for (const key of Object.keys(config.capacity)) config.capacity[key] = Number(data.get(`capacity.${key}`));
+  for (const [key] of policyFields) config.policies[key] = Number(data.get(`policy.${key}`)) / 100;
+  for (const key of SHOCK_KEYS) {
+    for (const [bound] of distributionColumns) {
+      config.simulation.distributions[key][bound] = Number(data.get(`shock.${key}.${bound}`)) / 100;
+    }
+  }
+  for (const [i, j] of correlationPairs) {
+    const value = Number(data.get(`corr.${i}.${j}`));
+    config.simulation.correlation[i][j] = value;
+    config.simulation.correlation[j][i] = value;
+  }
+  return config;
+}
+
+function applyScenario(config, message) {
+  const year = runYear(config);
+  state.config = config;
+  state.year = year;
+  state.revealed = 0;
+  state.period = 0;
+  state.mapBasis = 'budget';
+  state.settingsMessage = `${message} Full-year budget operating margin is ${formatPercent.format(annualBudgetMargin(year.budget))}.`;
+  state.pricingMessage = '';
+  storeState();
+  render();
+}
+
+function render() {
+  for (const button of navButtons) {
+    if (button.dataset.view === state.view) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+  renderHeader();
+  if (state.view === 'dashboard') renderDashboard();
+  if (state.view === 'map') renderMap();
+  if (state.view === 'pricing') {
+    const { effectiveMonth, routes, entityResults, openingPriceMethod } = reviewGoodsPricing(state.config, state.revealed);
+    pageBody.innerHTML = renderGoodsPricing({
+      revealed: state.revealed, effectiveMonth, routes, entityResults, openingPriceMethod, message: state.pricingMessage,
+    });
+  }
+  if (state.view === 'settings') renderSettings();
+}
+
+function setView(view, { focus = false } = {}) {
+  if (view === state.view) return;
+  state.view = view;
+  render();
+  if (focus) document.querySelector('#page-title').focus();
+  window.scrollTo(0, 0);
+}
+
+function focusAfterRender(button) {
+  const { action, period, metric, filter, mapEntity } = button.dataset;
+  const className = ['month-button', 'bar-group', 'table-select'].find((key) => button.classList.contains(key));
+  const selector = action ? `[data-action="${action}"]`
+    : period !== undefined && className ? `.${className}[data-period="${period}"]`
+    : metric ? `[data-metric="${metric}"]`
+    : filter ? `[data-filter="${filter}"]`
+    : mapEntity ? `[data-map-entity="${mapEntity}"]`
+    : null;
+  if (selector) document.querySelector(selector)?.focus({ preventScroll: true });
+}
+
+for (const button of navButtons) {
+  button.insertAdjacentHTML('afterbegin', icon(button.dataset.view));
+  button.addEventListener('click', () => {
+    const view = button.dataset.view;
+    if (location.hash !== `#${view}`) location.hash = view;
+    setView(view, { focus: true });
+  });
+}
+
+window.addEventListener('hashchange', () => setView(viewFromHash()));
+window.addEventListener('resize', () => {
+  if (state.view === 'map') drawMap();
+});
+
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('button');
+  if (!button) return;
+  if (button.hasAttribute('data-goods-price-quote')) {
+    useGoodsPriceQuote(button);
+    return;
+  }
+  const { action, period, metric, filter, mapEntity } = button.dataset;
+  if (action === 'reveal' && state.revealed < 12) {
+    state.period = state.revealed;
+    state.revealed += 1;
+    state.mapBasis = 'actual';
+    state.pricingMessage = '';
+    storeState();
+    announcement.textContent = `${months[state.period]} actuals revealed.`;
+  } else if (action === 'review-prices') {
+    location.hash = 'pricing';
+    setView('pricing', { focus: true });
+    return;
+  } else if (action === 'defaults') {
+    applyScenario(createConfig(), 'Default scenario restored. All 12 months are ready to reveal.');
+    focusAfterRender(button);
+    return;
+  } else if (action === 'clear-map-entity') {
+    state.mapEntity = null;
+  } else if (period !== undefined) {
+    state.period = Number(period);
+  } else if (metric) {
+    state.metric = metric;
+  } else if (filter) {
+    state.filter = filter;
+  } else if (mapEntity) {
+    state.mapEntity = state.mapEntity === mapEntity ? null : mapEntity;
+  } else {
+    return;
+  }
+  const scrollPositions = [...pageBody.querySelectorAll('.month-strip, .chart-scroll, .map-scroll, .table-scroll')].map((element) => element.scrollLeft);
+  render();
+  for (const [index, element] of [...pageBody.querySelectorAll('.month-strip, .chart-scroll, .map-scroll, .table-scroll')].entries()) {
+    element.scrollLeft = scrollPositions[index] ?? 0;
+  }
+  if (action === 'reveal') {
+    const month = document.querySelector('.month-button[aria-pressed="true"]');
+    const strip = month?.parentElement;
+    if (strip && month.offsetLeft + month.offsetWidth > strip.scrollLeft + strip.clientWidth) {
+      strip.scrollLeft = month.offsetLeft - strip.clientWidth + month.offsetWidth + 6;
+    }
+    if (state.revealed === 12) month?.focus({ preventScroll: true });
+  }
+  focusAfterRender(button);
+});
+
+pageBody.addEventListener('change', (event) => {
+  const select = event.target;
+  if (select.matches('[data-map-period]')) state.period = Number(select.value);
+  else if (select.matches('[data-map-basis]')) state.mapBasis = select.value;
+  else return;
+  const selector = select.matches('[data-map-period]') ? '[data-map-period]' : '[data-map-basis]';
+  renderMap();
+  document.querySelector(selector).focus({ preventScroll: true });
+});
+
+pageBody.addEventListener('input', (event) => {
+  if (event.target.name !== 'rd.usShare' || !event.target.validity.valid) return;
+  document.querySelector('#rd-allocation').textContent = rdAllocationLabel(event.target.valueAsNumber / 100);
+});
+
+pageBody.addEventListener('submit', (event) => {
+  const form = event.target;
+  if (form.id === 'goods-pricing-form') {
+    event.preventDefault();
+    try {
+      const config = applyGoodsPrices(state.config, state.revealed, readGoodsPriceOverrides(form));
+      if (config !== state.config) {
+        const year = runYear(config);
+        reviewGoodsPricing(config, state.revealed);
+        state.year = year;
+        state.config = config;
+        state.pricingMessage = `Transfer prices applied starting in ${months[state.revealed]}. The forecast has been updated.`;
+        storeState();
+      } else {
+        state.pricingMessage = 'The current transfer prices are still in effect.';
+      }
+      render();
+      document.querySelector('#goods-pricing-form button[type="submit"]').focus({ preventScroll: true });
+    } catch (error) {
+      document.querySelector('#goods-pricing-message').innerHTML = pricingStatus(error.message, true);
+    }
+    return;
+  }
+  if (form.id !== 'scenario-form') return;
+  event.preventDefault();
+  try {
+    applyScenario(readSettings(form), 'Scenario applied. All 12 budget months have been recalculated.');
+    document.querySelector('#scenario-form button[type="submit"]').focus({ preventScroll: true });
+  } catch (error) {
+    document.querySelector('#scenario-message').innerHTML = `<p role="alert" class="form-error">${html(error.message)}</p>`;
+  }
+});
+
+render();
