@@ -18,6 +18,21 @@ export function royaltyWarning({ royaltyRate, researchRate }) {
   return `The royalty rate of ${rate.format(royaltyRate)} is less than R&D spend of ${rate.format(researchRate)} of consolidated sales. This can be a sign that the royalty is too low.`;
 }
 
+const rateToTenth = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+/**
+ * The message shown when the licensee finishes the year with an operating loss.
+ * `closed` is true once all twelve months are actuals and nothing is left to project.
+ */
+export function licenseeLossWarning({ royaltyRate, swiss, swissBeforeRoyalty, breakEvenRate, closed = false }) {
+  const loss = wholeDollars.format(Math.abs(swiss));
+  const result = closed ? 'made' : 'is projected to make';
+  if (swissBeforeRoyalty <= 0 || !Number.isFinite(breakEvenRate)) {
+    return `Switzerland, the licensee, ${result} a full-year operating loss of ${loss}. It ${closed ? 'was' : 'is'} in a loss before any royalty.`;
+  }
+  return `At a royalty of ${rate.format(royaltyRate)}, Switzerland, the licensee, ${result} a full-year operating loss of ${loss}. ${closed ? 'It would have broken even' : 'It breaks even'} at a royalty of about ${rateToTenth.format(breakEvenRate)}.`;
+}
+
 function entityName(id) {
   return ENTITIES[id]?.name ?? id;
 }
@@ -109,13 +124,13 @@ function adjustmentForm({ yearEnd, message }) {
 export function allocationPanel({ allocation, fullYear, revealed, royalty }) {
   const flagged = royalty?.belowResearch;
   const basis = revealed >= 12 ? 'Full-year actuals' : revealed ? 'Full-year forecast at current prices' : 'Full-year budget';
-  const part = (label, value, note) => `<li><span>${html(label)}${note ? `<small>${html(note)}</small>` : ''}</span><strong>${wholeDollars.format(value)} · ${share.format(allocation.total ? value / allocation.total : 0)}</strong></li>`;
+  const part = (label, value, note, alert = false) => `<li${alert ? ' class="flagged"' : ''}><span>${html(label)}${note ? `<small>${html(note)}</small>` : ''}</span><strong>${wholeDollars.format(value)} · ${share.format(allocation.total ? value / allocation.total : 0)}</strong></li>`;
   return `<section class="panel breakdown" aria-labelledby="allocation-heading">
     <div class="panel-header"><div><h2 id="allocation-heading">Where the profit lands</h2><p class="subtitle">${basis} · sum of entity operating profit</p></div></div>
     <div class="allocation-grid">
       <ul class="detail-list">
         ${part('United States', allocation.us, 'IP owner, manufacturer and headquarters')}
-        ${part('Switzerland', allocation.swiss, 'European principal, after the royalty')}
+        ${part('Switzerland', allocation.swiss, 'European principal and licensee, after the royalty', allocation.licenseeLoss)}
         ${part('All other entities', allocation.routine, 'Routine returns')}
       </ul>
       <ul class="detail-list">
@@ -126,6 +141,7 @@ export function allocationPanel({ allocation, fullYear, revealed, royalty }) {
       </ul>
     </div>
     ${flagged ? `<p class="field-warning panel-note">${html(royaltyWarning(royalty))}</p>` : ''}
+    ${allocation.licenseeLoss && royalty ? `<p class="field-warning panel-note">${html(licenseeLossWarning({ ...allocation, royaltyRate: royalty.royaltyRate, closed: revealed >= 12 }))}</p>` : ''}
   </section>`;
 }
 

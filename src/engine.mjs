@@ -897,8 +897,13 @@ export function royaltyCheck(config) {
   return { royaltyRate, researchRate, belowResearch: royaltyRate < researchRate }
 }
 
-// Where the group's operating profit lands, and how much of the Swiss residual the royalty moves.
-function profitAllocation(months) {
+/**
+ * Where the group's operating profit lands, and how much of the Swiss residual the
+ * royalty moves. Switzerland is the licensee. The royalty changes nothing else in the
+ * model, so its profit falls in a straight line as the rate rises and reaches zero
+ * at `breakEvenRate`.
+ */
+export function profitAllocation(months) {
   const profit = id => sum(months.map(month => month.entities[id].operatingProfit))
   const royalty = sum(months.flatMap(month =>
     month.transactions.filter(transaction => transaction.policy === 'CH_ROYALTY').map(transaction => transaction.amount)))
@@ -906,9 +911,12 @@ function profitAllocation(months) {
   const swiss = profit('CH')
   const routine = sum(ALL_COMPANIES.filter(id => id !== 'US' && id !== 'CH').map(profit))
   const swissBeforeRoyalty = swiss + royalty
+  const royaltyBase = sum(months.map(month => month.royaltyBase))
   return {
-    us, swiss, routine, total: us + swiss + routine, royalty, swissBeforeRoyalty,
+    us, swiss, routine, total: us + swiss + routine, royalty, swissBeforeRoyalty, royaltyBase,
     royaltyShare: swissBeforeRoyalty ? royalty / swissBeforeRoyalty : 0,
+    breakEvenRate: royaltyBase ? swissBeforeRoyalty / royaltyBase : null,
+    licenseeLoss: swiss <= -0.005,
   }
 }
 

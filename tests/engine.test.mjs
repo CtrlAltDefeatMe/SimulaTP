@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyYearEndAdjustments, createConfig, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, upgradeConfig,
+  applyYearEndAdjustments, createConfig, profitAllocation, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms,
+  upgradeConfig,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks } from '../src/simulation.mjs'
 
@@ -148,4 +149,20 @@ test('the royalty can be set from 0% to 50% and is flagged when it is below the 
   const low = { ...config, policies: { ...config.policies, royaltyRate: 0.03 } }
   assert.deepEqual(royaltyCheck(low), { royaltyRate: 0.03, researchRate: 0.04, belowResearch: true })
   assert.equal(reviewGoodsPricing(low, 0).royalty.belowResearch, true)
+})
+
+test('a royalty above the break-even rate projects a loss for the Swiss licensee', () => {
+  const config = createConfig()
+  const withRoyalty = royaltyRate => profitAllocation(runYear({ ...config, policies: { ...config.policies, royaltyRate } }).budget)
+  const base = withRoyalty(0.05)
+  assert.equal(base.licenseeLoss, false)
+  assert.ok(base.breakEvenRate > 0.05 && base.breakEvenRate < 0.5)
+  // The royalty moves nothing else, so profit is linear in the rate and the break-even rate does not move.
+  const high = withRoyalty(0.45)
+  assert.equal(high.licenseeLoss, true)
+  assert.ok(Math.abs(high.breakEvenRate - base.breakEvenRate) < 1e-9)
+  assert.ok(Math.abs(high.swiss - (base.swissBeforeRoyalty - 0.45 * base.royaltyBase)) < 0.01)
+  const justBelow = withRoyalty(Math.floor(base.breakEvenRate * 1000) / 1000)
+  assert.equal(justBelow.licenseeLoss, false)
+  assert.equal(reviewGoodsPricing({ ...config, policies: { ...config.policies, royaltyRate: 0.45 } }, 0).allocation.licenseeLoss, true)
 })

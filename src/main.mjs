@@ -1,12 +1,13 @@
 import {
   applyGoodsPrices, applyYearEndAdjustments, createConfig, CUSTOMS_ROUTES, ENTITIES, MAX_ROYALTY_RATE, POLICY_LABELS, PRODUCTS,
-  quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
+  profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TAXED_ENTITIES,
+  upgradeConfig,
 } from './engine.mjs';
 import { renderBrief } from './brief-view.mjs';
 import { landPolygons } from './land.mjs';
 import { pricingStatus, readGoodsPriceOverrides, renderGoodsPricing, useGoodsPriceQuote } from './pricing-view.mjs';
 import { MARKET_SHOCK_KEYS, SHOCK_KEYS } from './simulation.mjs';
-import { readYearEndChoices, royaltyWarning } from './year-end-view.mjs';
+import { licenseeLossWarning, readYearEndChoices, royaltyWarning } from './year-end-view.mjs';
 
 const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -686,6 +687,8 @@ function renderSettings() {
   } = state.config;
   const marketVariation = simulation.marketVariation ?? { demand: 0, salesPrice: 0 };
   const royalty = royaltyCheck(state.config);
+  // Applying a scenario starts a new year, so the budget is the projection that matters here.
+  const licensee = profitAllocation(state.year.budget);
   const marginLocked = state.revealed > 0;
   const target = annualOperatingMargin ?? annualBudgetMargin(state.year.budget);
   pageBody.innerHTML = `
@@ -743,11 +746,12 @@ function renderSettings() {
             <div class="form-fields">
               <div class="field-pair">
                 ${policyFields.map(([key, label, max = 100]) => key === 'royaltyRate'
-                  ? `<label class="field ${royalty.belowResearch ? 'field-flag' : ''}" id="royalty-field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max, describedBy: 'royalty-warning' })}</label>`
+                  ? `<label class="field ${royalty.belowResearch || licensee.licenseeLoss ? 'field-flag' : ''}" id="royalty-field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max, describedBy: 'royalty-warning royalty-loss-warning' })}</label>`
                   : `<label class="field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max })}</label>`).join('')}
               </div>
               <p class="field-note">The royalty can be set anywhere from 0% to ${MAX_ROYALTY_RATE * 100}%.</p>
               <p id="royalty-warning" class="field-warning" role="status" ${royalty.belowResearch ? '' : 'hidden'}>${royalty.belowResearch ? html(royaltyWarning(royalty)) : ''}</p>
+              <p id="royalty-loss-warning" class="field-warning" role="status" data-before-royalty="${licensee.swissBeforeRoyalty}" data-royalty-base="${licensee.royaltyBase}" ${licensee.licenseeLoss ? '' : 'hidden'}>${licensee.licenseeLoss ? html(licenseeLossWarning({ ...licensee, royaltyRate: royalty.royaltyRate })) : ''}</p>
             </div>
           </section>
           <section class="panel" aria-labelledby="ranges-heading">
@@ -954,10 +958,23 @@ function updateRoyaltyWarning(form) {
   const research = form.elements['rd.salesRate'];
   const belowResearch = royalty.value !== '' && research.value !== '' && royalty.valueAsNumber < research.valueAsNumber;
   const warning = form.querySelector('#royalty-warning');
-  form.querySelector('#royalty-field').classList.toggle('field-flag', belowResearch);
   warning.hidden = !belowResearch;
   warning.textContent = belowResearch
     ? royaltyWarning({ royaltyRate: royalty.valueAsNumber / 100, researchRate: research.valueAsNumber / 100 }) : '';
+
+  // The licensee's budget profit falls in a straight line with the rate, so the typed
+  // rate can be projected from the applied scenario without rerunning the year.
+  const lossWarning = form.querySelector('#royalty-loss-warning');
+  const swissBeforeRoyalty = Number(lossWarning.dataset.beforeRoyalty);
+  const royaltyBase = Number(lossWarning.dataset.royaltyBase);
+  const royaltyRate = royalty.valueAsNumber / 100;
+  const swiss = swissBeforeRoyalty - royaltyRate * royaltyBase;
+  const licenseeLoss = royalty.value !== '' && Number.isFinite(swiss) && swiss <= -0.005;
+  lossWarning.hidden = !licenseeLoss;
+  lossWarning.textContent = licenseeLoss ? licenseeLossWarning({
+    royaltyRate, swiss, swissBeforeRoyalty, breakEvenRate: royaltyBase ? swissBeforeRoyalty / royaltyBase : null,
+  }) : '';
+  form.querySelector('#royalty-field').classList.toggle('field-flag', belowResearch || licenseeLoss);
 }
 
 pageBody.addEventListener('input', (event) => {
