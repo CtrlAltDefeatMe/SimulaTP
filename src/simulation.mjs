@@ -3,7 +3,7 @@ export const SHOCK_KEYS = Object.freeze(['demand', 'salesPrice', 'materialCost']
 export const MARKET_SHOCK_KEYS = Object.freeze(['demand', 'salesPrice']);
 
 export const DEFAULT_SIMULATION = Object.freeze({
-  seed: 'SimulaTP-2027',
+  seed: 'PlayTP2027',
   distributions: Object.freeze({
     demand: Object.freeze({ min: -0.18, mode: 0, max: 0.18 }),
     salesPrice: Object.freeze({ min: -0.10, mode: 0, max: 0.10 }),
