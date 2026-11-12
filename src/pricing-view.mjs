@@ -53,7 +53,62 @@ function policyPriceButton(route, price) {
   if (!Number.isFinite(price.recommended)) return '—';
   const display = dollars.format(price.recommended);
   const label = `Use policy price ${display} for ${productName(price.product)}, ${entityName(route.from)} to ${entityName(route.to)}`;
-  return `<button class="pricing-quote" type="button" aria-label="${html(label)}" data-goods-price-quote="${price.recommended.toFixed(2)}">${display}</button>`;
+  const belowCost = Number.isFinite(price.standardCost) && price.recommended < price.standardCost;
+  return `<button class="pricing-quote" type="button" aria-label="${html(label)}${belowCost ? ', below standard cost' : ''}" data-goods-price-quote="${price.recommended.toFixed(2)}">${display}</button>${belowCost ? '<small class="pricing-margin-target negative">Below cost</small>' : ''}`;
+}
+
+const isBelowCost = price => Number.isFinite(price.standardCost) && price.applied < price.standardCost;
+const listOf = items => items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+
+// Says which prices sit below the supplier's cost, or are held at the floor, and what follows from it.
+function pricingAlerts(routes, entityResults, priceFloor) {
+  const policies = new Map(entityResults.filter(row => row.policy).map(row => [row.id, row.policy]));
+  const below = routes.flatMap(route => route.prices.filter(isBelowCost).map(price => ({ route, price })));
+  const held = routes.filter(route => route.floorHeld?.length);
+  let panels = '';
+  if (below.length) {
+    panels += `<section class="panel pricing-alert" aria-labelledby="below-cost-heading">
+      <div class="panel-header"><div><h2 id="below-cost-heading">Sold below cost</h2><p class="subtitle">${below.length} goods ${below.length === 1 ? 'price is' : 'prices are'} below the supplier’s standard cost</p></div></div>
+      <div class="pricing-alert-copy">
+        <ul>${below.map(({ route, price }) => `<li><strong>${html(productName(price.product))}, ${html(entityName(route.from))} to ${html(entityName(route.to))}.</strong> ${format(price.applied)} against a standard cost of ${format(price.standardCost)}, ${markupPercent.format(1 - price.applied / price.standardCost)} below.</li>`).join('')}</ul>
+        <p>The policy price is what the distributor can pay after its own expenses, its target margin and any import duty. On a thin-margin line that can be less than the goods cost to make, so the supplier loses money on every unit before its own expenses. You can accept that, raise the price and let the distributor fall short of its range, or set a price floor in <a href="#settings">Scenario settings</a>.</p>
+      </div>
+    </section>`;
+  }
+  if (held.length && priceFloor) {
+    const item = (route) => {
+      const free = route.policyWithoutFloor;
+      const priced = family => route.prices.find(price => price.product === family);
+      const policyOf = family => Number.isFinite(free?.[family]) ? free[family] : null;
+      // A line the floor lifts above its policy price, and a line priced under its policy price to make up for that.
+      const raised = route.floorHeld.filter(family => policyOf(family) !== null && policyOf(family) < priced(family).applied);
+      const lowered = route.prices.map(price => price.product).filter(family => policyOf(family) !== null && priced(family).applied < policyOf(family));
+      const other = route.floorHeld.filter(family => !raised.includes(family) && !lowered.includes(family));
+      const moved = family => `${productName(family)} to ${format(priced(family).applied)} from ${format(policyOf(family))}${route.floorHeld.includes(family) && lowered.includes(family) ? ' (its own floor)' : ''}`;
+      let text = '';
+      if (raised.length) text += ` The floor lifts ${listOf(raised.map(moved))}.`;
+      if (other.length) text += ` ${listOf(other.map(productName))} ${other.length === 1 ? 'is' : 'are'} held at the floor.`;
+      const policy = policies.get(route.to);
+      if (!route.markup && policy && Number.isFinite(policy.forecast)) {
+        const short = policy.status === 'below' || route.floorShort;
+        if (lowered.length) text += ` ${short ? 'The policy lowers' : `To keep ${entityName(route.to)} at its target, the policy lowers`} ${listOf(lowered.map(moved))}.`;
+        const where = policy.status === 'within'
+          ? short ? 'inside its range but short of its target' : 'inside its range'
+          : `${policy.status} its range of ${percent.format(policy.low)}–${percent.format(policy.high)}`;
+        text += ` ${entityName(route.to)} is forecast at ${percent.format(policy.forecast)}, ${where}.`;
+        if (short) text += ' The floor takes priority over the distributor’s target, so the shortfall stays.';
+      }
+      return `<li><strong>${html(entityName(route.from))} to ${html(entityName(route.to))}.</strong>${html(text)}</li>`;
+    };
+    panels += `<section class="panel pricing-alert pricing-alert-floor" aria-labelledby="floor-alert-heading">
+      <div class="panel-header"><div><h2 id="floor-alert-heading">Price floor in effect</h2><p class="subtitle">No goods price can go below standard cost plus ${compactPercent.format(priceFloor.markup)}, even when that leaves a distributor short of its range</p></div></div>
+      <div class="pricing-alert-copy">
+        <ul>${held.map(item).join('')}</ul>
+        <p>The floor protects the supplier from selling below cost. Where it binds, the distributor pays more than its policy price, and a year-end credit cannot take the year’s purchases below the floor either.</p>
+      </div>
+    </section>`;
+  }
+  return panels;
 }
 
 function shortPolicy(route) {
@@ -72,13 +127,13 @@ function costMarkup(price) {
   if (!Number.isFinite(price.standardCost) || !price.standardCost) return '—';
   const markup = price.applied / price.standardCost - 1;
   const atFloor = Number.isFinite(price.floor) && price.applied <= price.floor;
-  return `<span class="${markup < 0 ? 'negative' : ''}">${markup < 0 ? '−' : ''}${markupPercent.format(Math.abs(markup))}</span>${atFloor ? '<small class="pricing-margin-target">At the floor</small>' : ''}`;
+  return `<span class="${markup < 0 ? 'negative' : ''}">${markup < 0 ? '−' : ''}${markupPercent.format(Math.abs(markup))}</span>${markup < 0 ? '<small class="status-chip miss">Below cost</small>' : ''}${atFloor ? '<small class="pricing-margin-target">At the floor</small>' : ''}`;
 }
 
 function pricingTable(routes, editing, priceFloor) {
-  const rule = priceFloor
+  const rule = `${priceFloor
     ? `Price floor: standard cost plus ${compactPercent.format(priceFloor.markup)}. No price can go below it.`
-    : 'No price floor is set. A price can go below standard cost.';
+    : 'No price floor is set. A price can go below standard cost.'} Import duty is paid by the buyer on top of the price and becomes part of its cost of sales.`;
   return `<section class="panel" aria-labelledby="goods-pricing-table-heading">
     <div class="panel-header"><div><h2 id="goods-pricing-table-heading">Goods prices by channel</h2><p class="subtitle">USD per unit · ${rule}</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="goods-pricing-table-heading">
@@ -89,13 +144,13 @@ function pricingTable(routes, editing, priceFloor) {
           <th scope="col">Policy price</th><th scope="col">New price</th>
         </tr></thead>
         ${routes.map(route => `<tbody data-pricing-channel="${html(route.key)}">
-          ${route.prices.map((price, index) => `<tr>
+          ${route.prices.map((price, index) => `<tr${isBelowCost(price) ? ' class="pricing-below-cost"' : ''}>
             ${index === 0 ? `<th scope="rowgroup" class="pricing-channel" rowspan="${route.prices.length}">
               ${html(entityName(route.from))} <span aria-hidden="true">→</span><span class="visually-hidden"> to </span> ${html(entityName(route.to))}
             </th><td class="pricing-policy" rowspan="${route.prices.length}">${html(shortPolicy(route))}</td>` : ''}
             <th scope="row" class="pricing-family">${html(productName(price.product))}</th>
             <td>${format(price.standardCost)}${Number.isFinite(price.floor) ? `<small class="pricing-margin-target">Floor ${format(price.floor)}</small>` : ''}</td>
-            <td>${format(price.applied)}</td>
+            <td>${format(price.applied)}${price.duty ? `<small class="pricing-margin-target">+ ${markupPercent.format(price.duty)} import duty</small>` : ''}</td>
             <td>${costMarkup(price)}</td>
             <td>${editing ? policyPriceButton(route, price) : format(price.recommended)}</td>
             <td class="pricing-edit">${editing ? priceInput(route, price) : '—'}</td>
@@ -173,7 +228,9 @@ function entityResultsPanel(revealed, rows, routes) {
   const columnHeadings = (isForecast = false) => resultColumns.map(([, label], index) =>
     `<th scope="col"${isForecast && index === 0 ? ' class="pricing-forecast-first"' : ''}>${html(label)}</th>`).join('');
   const targets = new Map(routes.map(({ to, targetMargin }) => [to, targetMargin]));
-  const resultCells = (result, policy, isForecast = false) => resultColumns.map(([key, , formatter], index) => {
+  // Distributors whose goods prices are held at the floor.
+  const floored = new Set(routes.filter(route => !route.markup && route.floorHeld?.length).map(route => route.to));
+  const resultCells = (result, policy, isForecast = false, id = null) => resultColumns.map(([key, , formatter], index) => {
     let policyDetails = '';
     if (key === 'operatingMargin' && Number.isFinite(policy?.target)) {
       // One short line each, so the margin column stays narrow.
@@ -196,6 +253,7 @@ function entityResultsPanel(revealed, rows, routes) {
       } else if (policy.status === 'within' && Number.isFinite(policy.low) && Number.isFinite(policy.forecast)) {
         policyDetails += `<small class="pricing-policy-ok">${statusLabels.within}</small>`;
       }
+      if (floored.has(id)) policyDetails += detail('Prices held at the floor');
     }
     const forecastClasses = index === 0 ? 'pricing-forecast-value pricing-forecast-first' : 'pricing-forecast-value';
     return `<td${isForecast ? ` class="${forecastClasses}"` : ''}>${format(result?.[key], formatter)}${policyDetails}</td>`;
@@ -218,7 +276,7 @@ function entityResultsPanel(revealed, rows, routes) {
         const statusClass = comparison.outOfPolicy ? 'pricing-out-of-policy' : '';
         return `<tr class="${[rowClass, statusClass].filter(Boolean).join(' ')}">
           <th scope="row" class="table-name">${html(entityName(id))}</th>
-          ${resultCells(revealed ? ytd : null, showForecast ? undefined : comparison)}${showForecast ? resultCells(fullYear, comparison, true) : ''}
+          ${resultCells(revealed ? ytd : null, showForecast ? undefined : comparison, false, id)}${showForecast ? resultCells(fullYear, comparison, true, id) : ''}
         </tr>`;
       }).join('')}</tbody>
     </table></div>
@@ -231,7 +289,7 @@ function openingInventoryPanel(routes, openingPriceMethod) {
     <div class="panel-header"><h2 id="pricing-assumptions-heading">January opening inventory and starting prices</h2></div>
     <div class="pricing-assumptions-copy">
       <p>The model assumes each distributor opens January 1 with two months of base demand per product family, one month per lot. FIFO issues the November 2026 lot first, at 97% of the historical reference transfer price. The December 2026 lot carries 100% of that reference price.</p>
-      <p>The historical reference price equals the distributor’s base net resale price less operating expenses and the historical operating margin. The assumptions are ${compactPercent.format(DISTRIBUTOR_COST_RATE.lrd)} for expenses and 3% for margin at LRDs, and ${compactPercent.format(DISTRIBUTOR_COST_RATE.ffd)} for expenses and 7.5% for margin at FFDs. Both percentages are applied to the base net resale price.</p>
+      <p>The historical reference price equals the distributor’s base net resale price less operating expenses and the historical operating margin. The assumptions are ${compactPercent.format(DISTRIBUTOR_COST_RATE.lrd)} for expenses and 3% for margin at LRDs, and ${compactPercent.format(DISTRIBUTOR_COST_RATE.ffd)} for expenses and 7.5% for margin at FFDs. Both percentages are applied to the base net resale price. Where a distributor imports from another customs block, that reference is its landed cost: the transfer price plus the duty it pays on top.</p>
       <p>During the year each distributor orders enough to hold about two months of base demand. A new transfer price applies to new shipments only, and the older stock is sold first. A price change therefore reaches a distributor’s cost of sales about two months after it takes effect.</p>
       <p>When a scenario starts, the model sets transfer prices for new shipments to target each distributor’s full-year budget margin, using the FIFO costs and quantities expected to enter cost of sales. January’s margin can differ from the annual target because it reflects the cost of the opening lots sold that month.</p>
       ${openingPriceMethod === 'legacy' ? '<p class="pricing-assumptions-note">This in-progress scenario started with the prior pricing method. The FIFO-based starting prices apply to new or reset scenarios.</p>' : ''}
@@ -255,7 +313,7 @@ export function renderGoodsPricing(review) {
     ? renderYearEnd({ ...review, message: review.yearEndMessage }) : '';
   const results = `${yearEnd}${entityResultsPanel(revealed, entityResults, routes)}${allocationPanel(review)}`;
   const assumptions = openingInventoryPanel(routes, openingPriceMethod);
-  const prices = `${pricingTable(routes, editing, review.priceFloor)}${serviceFeeTable(review.services, review.actual, review.serviceBudget, editing)}`;
+  const prices = `${pricingAlerts(routes, entityResults, review.priceFloor)}${pricingTable(routes, editing, review.priceFloor)}${serviceFeeTable(review.services, review.actual, review.serviceBudget, editing)}`;
   if (!editing) return `${results}${assumptions}
     ${nextReview ? `<section class="panel pricing-period" aria-labelledby="pricing-review-heading">
       <div>

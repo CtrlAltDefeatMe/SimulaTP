@@ -65,7 +65,7 @@ function scorecard({ yearEnd, entityResults, fullYear, budget, priceRevisions })
   const exposure = yearEnd.reduce((total, entry) => total + (policies.get(entry.id)?.exposure ?? 0), 0);
   const adjusted = yearEnd.filter(entry => entry.amount);
   const moved = adjusted.reduce((total, entry) => total + Math.abs(entry.amount), 0);
-  const adjustmentDuty = Object.values(fullYear.customs.routes).reduce((total, route) => total + route.rate * route.adjustment, 0);
+  const { adjustmentDuty } = fullYear.customs;
   const consolidated = entityResults.find(row => row.id === 'consolidated').fullYear;
   const profitGap = consolidated.operatingProfit - budget.operatingProfit;
   return `<section aria-labelledby="year-end-review-heading" class="year-end-review">
@@ -82,11 +82,20 @@ function scorecard({ yearEnd, entityResults, fullYear, budget, priceRevisions })
       ${stat('Price reviews used', `${priceRevisions} of 3`, 'Quarterly reviews where prices or fees changed')}
       ${stat('Year-end adjustments', wholeDollars.format(moved), `${adjusted.length} of ${yearEnd.length} tested entities`)}
       ${stat('Group income tax', wholeDollars.format(fullYear.tax.total), `${percent.format(fullYear.tax.effectiveRate)} effective rate on local results · budget ${percent.format(budget.tax.effectiveRate)}`)}
-      ${stat('Customs duty', wholeDollars.format(fullYear.customs.total), `${wholeDollars.format(adjustmentDuty)} on year-end adjustments`)}
+      ${stat('Customs duty', wholeDollars.format(fullYear.customs.total), `Charged on imports and carried into cost of sales · ${wholeDollars.format(adjustmentDuty)} on year-end adjustments`)}
       ${stat('Consolidated operating profit', wholeDollars.format(consolidated.operatingProfit), `${profitGap < 0 ? '−' : '+'}${wholeDollars.format(Math.abs(profitGap))} vs budget`)}
       ${stat('Consolidated operating margin', percent.format(consolidated.operatingMargin), `Budget ${percent.format(budget.operatingMargin)}`)}
     </div>
   </section>`;
+}
+
+// A credit cannot take the year's purchases below the price floor. Say so where that bites.
+function floorLimit(entry) {
+  if (!entry.floorLimited?.target && !entry.floorLimited?.range) return '';
+  const reach = entry.floorLimited.range
+    ? `so ${entityName(entry.id)} cannot be brought into its range`
+    : `so ${entityName(entry.id)} cannot be brought to its target`;
+  return `<small class="pricing-margin-target negative">The price floor caps a credit at ${dollars.format(Math.abs(entry.toTarget))}, ${html(reach)}</small>`;
 }
 
 function adjustmentForm({ yearEnd, message }) {
@@ -94,13 +103,15 @@ function adjustmentForm({ yearEnd, message }) {
     const amount = mode === 'target' ? entry.toTarget : mode === 'range' ? entry.toRange : 0;
     const unavailable = mode === 'range' && entry.statusBefore === 'within';
     const limited = entry.floorLimited?.[mode] ? ', limited by the price floor' : '';
-    const label = mode === 'none' ? modeLabels.none : `${modeLabels[mode]} (${signedDollars(amount)}${limited})`;
+    const duty = mode === 'target' ? entry.dutyToTarget : mode === 'range' ? entry.dutyToRange : 0;
+    const withDuty = duty ? ` plus ${dollars.format(duty)} duty` : '';
+    const label = mode === 'none' ? modeLabels.none : `${modeLabels[mode]} (${signedDollars(amount)}${withDuty}${limited})`;
     return `<option value="${mode}" ${entry.mode === mode ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${html(label)}</option>`;
   };
   return `<form id="year-end-form" class="pricing-form">
     <section class="panel" aria-labelledby="year-end-adjust-heading">
       <div class="panel-header"><div><h2 id="year-end-adjust-heading">Year-end adjustments</h2>
-        <p class="subtitle" id="year-end-help">The range is tested on the local statutory (stat) result: US GAAP with the stat adjustment revealed at the December close. A positive stat adjustment is extra local cost. For a distributor, a positive amount is paid to its supplier and a negative amount is a credit from it. For Poland and India, a positive amount is an extra fee from their customers and a negative amount is a refund. Adjustments are booked in December and do not change consolidated profit.</p></div></div>
+        <p class="subtitle" id="year-end-help">The range is tested on the local statutory (stat) result: US GAAP with the stat adjustment revealed at the December close. A positive stat adjustment is extra local cost. For a distributor, a positive amount is paid to its supplier and a negative amount is a credit from it. For Poland and India, a positive amount is an extra fee from their customers and a negative amount is a refund. Adjustments are booked in December. They do not change consolidated profit, except that an increase paid by Asia or Canada attracts customs duty, which the distributor bears. A credit earns no duty refund.</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="year-end-adjust-heading"><table class="year-end-table">
         <thead><tr>
           <th scope="col">Entity</th><th scope="col">Counterparty</th><th scope="col">US GAAP result</th><th scope="col">Stat adjustment</th>
@@ -116,7 +127,7 @@ function adjustmentForm({ yearEnd, message }) {
           <td>${rangeLabel(entry)}<small class="pricing-margin-target">Target ${percent.format(entry.target)}</small></td>
           <td><select name="yearEnd.${html(entry.id)}" aria-label="Year-end adjustment for ${html(entityName(entry.id))}" aria-describedby="year-end-help">
             ${['none', 'range', 'target'].map(mode => option(entry, mode)).join('')}
-          </select></td>
+          </select>${entry.dutyRate ? `<small class="pricing-margin-target">${entry.duty ? `Adds ${dollars.format(entry.duty)} customs duty` : `An increase adds ${percent.format(entry.dutyRate)} duty`}</small>` : ''}${floorLimit(entry)}</td>
           <td>${percent.format(entry.marginAfter)}${statusChip(entry.statusAfter)}</td>
         </tr>`).join('')}</tbody>
       </table></div>
@@ -145,7 +156,7 @@ export function allocationPanel({ allocation, fullYear, revealed, royalty }) {
         <li${flagged ? ' class="flagged"' : ''}><span>Royalty paid to the United States${royalty ? `<small>${rate.format(royalty.royaltyRate)} royalty · R&amp;D ${rate.format(royalty.researchRate)} of consolidated sales</small>` : ''}</span><strong>${wholeDollars.format(allocation.royalty)}</strong></li>
         <li><span>Royalty as a share of Swiss profit before royalty</span><strong>${share.format(allocation.royaltyShare)}</strong></li>
         <li><span>Group income tax<small>${percent.format(fullYear.tax.effectiveRate)} effective rate on entity profit</small></span><strong>${wholeDollars.format(fullYear.tax.total)}</strong></li>
-        <li><span>Customs duty on declared transfer prices<small>Memo. Not deducted from operating profit</small></span><strong>${wholeDollars.format(fullYear.customs.total)}</strong></li>
+        <li><span>Customs duty charged on imports<small>Part of the importers’ cost of sales as the goods are sold</small></span><strong>${wholeDollars.format(fullYear.customs.total)}</strong></li>
       </ul>
     </div>
     ${flagged ? `<p class="field-warning panel-note">${html(royaltyWarning(royalty))}</p>` : ''}

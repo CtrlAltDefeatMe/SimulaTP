@@ -1,4 +1,4 @@
-import { ENTITIES } from './engine.mjs';
+import { ENTITIES, PRODUCTS } from './engine.mjs';
 
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const rate = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -38,8 +38,14 @@ function reasons(entry, pricesChanged) {
   };
   const said = entry.drivers.filter(driver => Math.abs(driver.points) >= WORTH_SAYING)
     .sort((left, right) => Math.abs(right.points) - Math.abs(left.points));
-  if (!said.length) return [`It finished close to its budgeted ${measure}${service ? '' : ', with no single effect of note'}.`];
-  return said.map(driver => sentences[driver.key](driver));
+  // A price floor that held this distributor's prices up is part of why it finished low.
+  const floor = [];
+  if (entry.status === 'below' && facts.floor?.held.length) {
+    const names = facts.floor.held.map(family => PRODUCTS[family].name);
+    floor.push(`The price floor set what it paid for ${names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`}, and the floor takes priority over its range.${facts.floor.creditLimited ? ' A year-end credit cannot go below the floor either, so it cannot be brought into its range.' : ''}`);
+  }
+  if (!said.length) return floor.length ? floor : [`It finished close to its budgeted ${measure}${service ? '' : ', with no single effect of note'}.`];
+  return [...said.map(driver => sentences[driver.key](driver)), ...floor];
 }
 
 function bridge(entry) {

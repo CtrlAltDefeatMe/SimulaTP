@@ -1,5 +1,5 @@
 import {
-  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_ROUTES, ENTITIES, explainYear, MAX_ROYALTY_RATE,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_BLOCKS, CUSTOMS_LANES, ENTITIES, explainYear, goodsPriceAlerts, GOODS_ORIGINS, MAX_ROYALTY_RATE,
   POLICY_LABELS, PRODUCTS, productLineResults, profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear,
   summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
 } from './engine.mjs';
@@ -393,16 +393,36 @@ function productLinePanel(budget, actual) {
   </section>`;
 }
 
-function customsRouteLabel({ from, to }) {
-  // Swiss-owned goods ship from and to the Belgian warehouse.
-  return `${mapLabel(from === 'CH' ? 'BE' : from)} → ${mapLabel(to === 'CH' ? 'BE' : to)}`;
+const productFamilies = Object.keys(PRODUCTS);
+
+// Duty by importing block, by where the goods were made and by product line.
+function customsPanel(customs, basis) {
+  const cell = ({ rate, value, duty }) => `<td>${amount(duty)}<small class="pricing-margin-target">${formatPercent.format(rate)} of ${amount(value)}</small></td>`;
+  return `<section class="panel" aria-labelledby="customs-heading">
+    <div class="panel-header"><div><h2 id="customs-heading">Customs duty</h2><p class="subtitle">${basis} · duty charged on the declared transfer price of goods entering a customs block</p></div></div>
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="customs-heading"><table class="customs-table">
+      <thead><tr><th scope="col">Imports into</th><th scope="col">Goods made in</th>
+        ${productFamilies.map(family => `<th scope="col">${html(PRODUCTS[family].name)}</th>`).join('')}<th scope="col">Duty</th></tr></thead>
+      <tbody>
+        ${CUSTOMS_LANES.map(({ key, importer, origin }) => `<tr>
+          <th scope="row" class="table-name">${html(CUSTOMS_BLOCKS[importer].name)}</th><td class="table-text">${html(GOODS_ORIGINS[origin])}</td>
+          ${productFamilies.map(family => cell(customs.lanes[key].products[family])).join('')}<td>${amount(customs.lanes[key].duty)}</td>
+        </tr>`).join('')}
+        ${Object.entries(customs.adjustments).map(([importer, entry]) => `<tr>
+          <th scope="row" class="table-name">${html(CUSTOMS_BLOCKS[importer].name)}</th><td class="table-text" colspan="${productFamilies.length + 1}">Year-end adjustment of ${signed(entry.amount)}, at the year’s average rate of ${formatPercent.format(entry.rate)}${entry.amount < 0 ? '. A credit earns no refund' : ''}</td>
+          <td>${amount(entry.duty)}</td>
+        </tr>`).join('')}
+        <tr class="total-row"><th scope="row" class="table-name">All imports</th><td colspan="${productFamilies.length + 1}"></td><td>${amount(customs.total)}</td></tr>
+      </tbody>
+    </table></div>
+    <p class="field-note panel-note">The importer adds the duty to the cost of the goods, so it reaches cost of sales when they are sold. Europe is one customs block: the EU, Switzerland and the United Kingdom. Goods that move inside a block, or return to the block that made them, pay no duty.</p>
+  </section>`;
 }
 
 function taxPanel(budget, actual) {
   const { tax, customs } = summarizeTaxAndCustoms(state.config, [actual ?? budget]);
   const basis = `${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD`;
-  return `<div class="dashboard-detail">
-    <section class="panel" aria-labelledby="tax-heading">
+  return `<section class="panel" aria-labelledby="tax-heading">
       <div class="panel-header"><div><h2 id="tax-heading">Income tax</h2><p class="subtitle">${basis} · each entity’s rate applied to its operating profit</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="tax-heading"><table>
         <thead><tr><th scope="col">Entity</th><th scope="col">Operating profit</th><th scope="col">Tax rate</th><th scope="col">Income tax</th></tr></thead>
@@ -414,18 +434,7 @@ function taxPanel(budget, actual) {
         </tbody>
       </table></div>
     </section>
-    <section class="panel breakdown" aria-labelledby="customs-heading">
-      <div class="panel-header"><div><h2 id="customs-heading">Customs duty</h2><p class="subtitle">${basis} · duty on declared transfer prices</p></div></div>
-      ${metricList([
-        ...CUSTOMS_ROUTES.map((route) => {
-          const entry = customs.routes[route.key];
-          return [`${customsRouteLabel(route)} · ${formatPercent.format(entry.rate)}`, amount(entry.duty)];
-        }),
-        ['Total duty', amount(customs.total)],
-      ])}
-      <p class="field-note panel-note">Memo. Duty is not deducted from operating profit. Shipments from Belgium to Germany and France stay inside the EU.</p>
-    </section>
-  </div>`;
+    ${customsPanel(customs, basis)}`;
 }
 
 function controlPanels(budget, actual) {
@@ -454,12 +463,28 @@ function controlPanels(budget, actual) {
   </div>`;
 }
 
+// Flags goods prices in force this month that are below the supplier's cost or held at the floor.
+function priceAlertBanner() {
+  const { belowCost, atFloor, floorMarkup } = goodsPriceAlerts(state.config, state.period + 1);
+  const name = ({ product, from, to }) => `${PRODUCTS[product].name}, ${labelFor(from)} to ${labelFor(to)}`;
+  const list = rows => rows.map(name).map(html).join('; ');
+  let banners = '';
+  if (belowCost.length) {
+    banners += `<p class="alert-banner" role="note"><strong>Sold below cost.</strong> In ${months[state.period]}, ${belowCost.length} goods ${belowCost.length === 1 ? 'price is' : 'prices are'} below the supplier’s standard cost: ${list(belowCost)}. <a href="#pricing">See Transfer prices</a> for the amounts and what you can do.</p>`;
+  }
+  if (atFloor.length) {
+    banners += `<p class="alert-banner alert-banner-floor" role="note"><strong>Price floor in effect.</strong> In ${months[state.period]}, ${atFloor.length} goods ${atFloor.length === 1 ? 'price is' : 'prices are'} held at the floor of standard cost plus ${formatPercent.format(floorMarkup)}: ${list(atFloor)}. The floor takes priority over a distributor’s range. <a href="#pricing">See Transfer prices</a> for the effect on margins.</p>`;
+  }
+  return banners;
+}
+
 function renderDashboard() {
   const budget = state.year.budget[state.period];
   const actual = state.period < state.revealed ? state.year.actual[state.period] : null;
   const bridge = actual ? state.year.variance[state.period] : null;
   pageBody.innerHTML = `
     ${monthStrip()}
+    ${priceAlertBanner()}
     ${kpis(budget.consolidated, actual?.consolidated)}
     ${chart()}
     ${entityPanel(budget, actual)}
@@ -869,7 +894,7 @@ function renderSettings() {
             <div class="form-fields">
               <label class="check-field"><input type="checkbox" name="priceFloor.enabled" ${priceFloor.enabled ? 'checked' : ''}> Never price goods below standard cost plus a markup</label>
               <label class="field">Floor markup on standard cost (%)${numberInput('priceFloor.markup', percentInput(priceFloor.markup), { min: 0, max: 100 })}</label>
-              <p class="field-note">Standard cost is budget materials and conversion, plus the Polish toll fee on goods the Swiss principal sells. While the rule is on, starting prices, policy prices, prices you enter and year-end credits cannot take a price below the floor.</p>
+              <p class="field-note">Standard cost is budget materials and conversion, plus the Polish toll fee on goods the Swiss principal sells. While the rule is on, starting prices, policy prices, prices you enter and year-end credits cannot take a price below the floor. The floor takes priority over a distributor’s range: where it binds, the distributor can finish below its range, and the Transfer prices page explains each case. With the rule off, prices below standard cost are allowed and are flagged in red.</p>
             </div>
           </section>
           <section class="panel" aria-labelledby="service-settings-heading">
@@ -905,16 +930,28 @@ function renderSettings() {
         </div>
       </div>
       <section class="panel" aria-labelledby="tax-settings-heading">
-        <div class="panel-header"><div><h2 id="tax-settings-heading">Income tax and customs duty</h2><p class="subtitle">Illustrative rates, as percentages</p></div></div>
+        <div class="panel-header"><div><h2 id="tax-settings-heading">Income tax</h2><p class="subtitle">Illustrative rates, as percentages</p></div></div>
         <div class="form-fields">
           <div class="rate-fields">
             ${TAXED_ENTITIES.map((id) => `<label class="field">${html(labelFor(id))} income tax${numberInput(`tax.${id}`, percentInput(tax.rates[id]), { min: 0, max: 99 })}</label>`).join('')}
           </div>
-          <div class="rate-fields">
-            ${CUSTOMS_ROUTES.map((route) => `<label class="field">${html(customsRouteLabel(route))} duty${numberInput(`duty.${route.key}`, percentInput(customs.rates[route.key]), { min: 0, max: 99 })}</label>`).join('')}
-          </div>
-          <p class="field-note">Income tax is each entity’s rate applied to its operating profit, and to its local statutory profit once the year is closed. Duty is charged on the declared transfer price of goods that cross a customs border and is reported as a memo. It is not deducted from operating profit.</p>
+          <p class="field-note">Income tax is each entity’s rate applied to its operating profit, and to its local statutory profit once the year is closed.</p>
         </div>
+      </section>
+      <section class="panel" aria-labelledby="customs-settings-heading">
+        <div class="panel-header"><div><h2 id="customs-settings-heading">Customs duty assumptions</h2><p class="subtitle">Import duty on the declared transfer price, as percentages · by importing block, where the goods were made and product line</p></div></div>
+        <div class="table-scroll" tabindex="0" role="region" aria-labelledby="customs-settings-heading"><table class="duty-table">
+          <thead><tr><th scope="col">Imports into</th><th scope="col">Goods made in</th>
+            ${productFamilies.map(family => `<th scope="col">${html(PRODUCTS[family].name)}</th>`).join('')}</tr></thead>
+          <tbody>${CUSTOMS_LANES.map(({ key, importer, origin }) => `<tr>
+            <th scope="row">${html(CUSTOMS_BLOCKS[importer].name)}${CUSTOMS_BLOCKS[importer].members ? `<small class="pricing-margin-target">${html(CUSTOMS_BLOCKS[importer].members)}</small>` : ''}</th>
+            <td class="table-text">${html(GOODS_ORIGINS[origin])}</td>
+            ${productFamilies.map(family => `<td>${numberInput(`duty.${key}.${family}`, percentInput(customs.rates[key]?.[family] ?? 0), {
+              min: 0, max: 99, label: `Duty on ${PRODUCTS[family].name} made in ${GOODS_ORIGINS[origin]} and imported into ${CUSTOMS_BLOCKS[importer].name}, percent`,
+            })}</td>`).join('')}
+          </tr>`).join('')}</tbody>
+        </table></div>
+        <p class="field-note panel-note">Europe is one customs block: the EU, Switzerland and the United Kingdom. Goods that move inside a block, or return to the block that made them, pay no duty. Duty is charged each time goods enter a block, on their declared transfer price. The importer adds it to the cost of the goods, so it reaches cost of sales when they are sold, and policy prices to distributors in another block are set net of it. The consolidated target margin above is held when these rates change: unit costs are rescaled around the duty. Canada is supplied from the US plant, so no Europe-made goods reach it in this supply chain and that row has no effect.</p>
       </section>
       <div id="scenario-message" aria-live="polite">${state.settingsMessage ? `<p class="form-message">${html(state.settingsMessage)}</p>` : ''}</div>
       <div class="panel form-footer">
@@ -940,7 +977,9 @@ function readSettings(form) {
   for (const [kind, bound] of rangeFields) config.ranges[kind][bound] = Number(data.get(`range.${kind}.${bound}`)) / 100;
   for (const key of MARKET_SHOCK_KEYS) config.simulation.marketVariation[key] = Number(data.get(`marketVariation.${key}`)) / 100;
   for (const id of TAXED_ENTITIES) config.tax.rates[id] = Number(data.get(`tax.${id}`)) / 100;
-  for (const { key } of CUSTOMS_ROUTES) config.customs.rates[key] = Number(data.get(`duty.${key}`)) / 100;
+  config.customs = { rates: Object.fromEntries(CUSTOMS_LANES.map(({ key }) => [
+    key, Object.fromEntries(productFamilies.map(family => [family, Number(data.get(`duty.${key}.${family}`)) / 100])),
+  ])) };
   config.priceFloor = { enabled: data.get('priceFloor.enabled') === 'on', markup: Number(data.get('priceFloor.markup')) / 100 };
   config.services.polandFixedShare = Number(data.get('services.polandFixedShare')) / 100;
   config.simulation.serviceCostVariation = Number(data.get('serviceCostVariation')) / 100;

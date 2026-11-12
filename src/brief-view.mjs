@@ -82,8 +82,8 @@ export function renderBrief({ config, revealed }) {
           <li>New prices apply to new shipments only. Each distributor holds about two months of stock, which keeps its old cost and is sold first, so a price change takes about two months to reach its cost of sales.</li>
           <li>Poland and India are paid a fixed monthly fee, but their costs move. Part of Poland’s cost is fixed overhead. In a slow month its cost falls by less than its output and the fee does not fall at all, so its markup rises. A busy month does the reverse.</li>
           <li>${priceFloor?.enabled
-            ? `A price floor is in force. No goods price can go below standard cost plus ${percent.format(priceFloor.markup)}, and a year-end credit cannot undo it.`
-            : 'No price floor is set, so a goods price can fall below the supplier’s standard cost. You can set one in Scenario settings.'}</li>
+            ? `A price floor is in force. No goods price can go below standard cost plus ${percent.format(priceFloor.markup)}, and a year-end credit cannot undo it. The floor takes priority over a distributor’s range, and the Transfer prices page says where it binds and what it does to the distributor’s margin.`
+            : 'No price floor is set, so a goods price can fall below the supplier’s standard cost. Prices below cost are flagged in red on the Dashboard and the Transfer prices page. You can set a floor in Scenario settings.'}</li>
           <li>At the December close each entity outside the United States has a ${percent.format(config.simulation?.statAdjustment?.probability ?? 1)} chance of an unexpected GAAP-to-stat adjustment: up to ${percent.format(config.simulation?.statAdjustment?.max ?? 0)} of its operating expenses, up or down. A result inside the range on US GAAP can land outside it in the local accounts.</li>
           <li>A pop-up then explains where each tested entity finished and why. Choose a year-end adjustment for each one and read the year-end review.</li>
           <li>To see what happens when nobody acts, use <strong>Run the full year</strong> on the Dashboard. It reveals every month at unchanged prices and fees. You can then replay the same year and manage it.</li>
@@ -93,7 +93,7 @@ export function renderBrief({ config, revealed }) {
         <div class="panel-header"><h2 id="brief-cost-heading">What a miss costs</h2></div>
         <div class="brief-copy">
           <p><strong>Tax at risk.</strong> A tested entity that finishes below its range is assumed to be adjusted up to its target by its own tax authority. One that finishes above is assumed to be adjusted by the tax authority of its supplier or, for Poland and India, of its customers. With no relief on the other side, the group pays tax on the same profit twice.</p>
-          <p><strong>Customs duty.</strong> A year-end adjustment that raises what a distributor paid also raises the declared customs value, and duty is due on the increase. A credit earns no duty refund.</p>
+          <p><strong>Customs duty.</strong> Europe (the EU, Switzerland and the United Kingdom) is one customs block. The United States, Canada and Asia are three more. Goods pay duty when they enter a block from another one, at a rate set by product line and by where they were made. The importer adds the duty to the cost of the goods, so it is part of cost of sales, and policy prices into Asia and Canada are set net of it. A year-end adjustment that raises what a distributor outside Europe paid also raises the declared customs value, and duty is due on the increase. A credit earns no duty refund.</p>
           <p><strong>Group tax.</strong> Moving profit between entities changes the group’s tax bill, because their tax rates differ.</p>
         </div>
       </section>

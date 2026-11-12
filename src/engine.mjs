@@ -76,9 +76,11 @@ const ZERO_SHOCK = { demand: 0, salesPrice: 0, materialCost: 0 }
 const DEFAULT_RD_RATE = 0.04
 // The default budget before R&D, less R&D at its default share of sales. Keeping the
 // target equal to the uncalibrated budget leaves the base unit costs unscaled.
-const DEFAULT_ANNUAL_MARGIN = 2_381_070.1859345874 / 10_487_570 - DEFAULT_RD_RATE
-// Defaults of earlier versions, when unit costs and operating expenses were lower.
-const PREVIOUS_DEFAULT_MARGINS = [3_965_513.159268929, 3_980_550.8704, 4_017_544.4704].map(profit => profit / 10_487_570 - DEFAULT_RD_RATE)
+const DEFAULT_ANNUAL_MARGIN = 2_287_230.2960874448 / 10_487_570 - DEFAULT_RD_RATE
+// Defaults of earlier versions: before customs duty entered cost of sales, and before unit
+// costs and operating expenses were raised.
+const PREVIOUS_DEFAULT_MARGINS = [2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
+  .map(profit => profit / 10_487_570 - DEFAULT_RD_RATE)
 const RD_MARKUP = 0.10
 // Arm's-length ranges for the tested distributors. Each range must contain its target.
 const DEFAULT_RANGES = {
@@ -93,9 +95,25 @@ const POLICY_KINDS = {
 const policyKind = id => id === 'PL' ? 'toll' : id === 'IN' ? 'services' : LRD.has(id) ? 'lrd' : 'ffd'
 // Illustrative statutory income tax rates. They are scenario assumptions, not tax advice.
 const DEFAULT_TAX_RATES = { US: 0.25, CH: 0.15, PL: 0.19, BE: 0.25, DE: 0.30, FR: 0.25, UK: 0.25, APAC: 0.17, CA: 0.265, IN: 0.25 }
-// Illustrative import duty on the declared transfer price, keyed by goods route.
-// Shipments from the Belgian warehouse to Germany and France stay inside the EU.
-const DEFAULT_DUTY_RATES = { 'US-CH': 0.03, 'CH-US': 0.10, 'CH-UK': 0, 'CH-APAC': 0.05, 'US-CA': 0 }
+// Customs territories. The EU, Switzerland and the United Kingdom are treated as one block.
+export const CUSTOMS_BLOCKS = {
+  EU: { name: 'Europe', members: 'EU, Switzerland and United Kingdom' },
+  US: { name: 'United States' },
+  CA: { name: 'Canada' },
+  APAC: { name: 'Asia' },
+}
+const customsBlock = id => id !== 'EU' && id in CUSTOMS_BLOCKS ? id : 'EU'
+// Goods are made in the United States or, for the Swiss principal, in Poland.
+export const GOODS_ORIGINS = { US: 'United States', EU: 'Europe (Poland)' }
+// A lane is one importing block and one place the goods were made. Goods that move inside
+// a block, or return to the block that made them, pay no duty and have no lane.
+export const CUSTOMS_LANES = [['EU', 'US'], ['US', 'EU'], ['CA', 'US'], ['CA', 'EU'], ['APAC', 'US'], ['APAC', 'EU']]
+  .map(([importer, origin]) => ({ key: importer + '.' + origin, importer, origin }))
+// Illustrative import duty on the declared transfer price. Each lane starts with one rate for all product lines.
+const DEFAULT_DUTY_RATES = { 'EU.US': 0.03, 'US.EU': 0.10, 'CA.US': 0, 'CA.EU': 0.04, 'APAC.US': 0.05, 'APAC.EU': 0.05 }
+// Rates used to be set by goods route, for every product and origin entering the destination.
+const LEGACY_DUTY_ROUTES = { 'EU.US': 'US-CH', 'US.EU': 'CH-US', 'CA.US': 'US-CA', 'CA.EU': 'US-CA', 'APAC.US': 'CH-APAC', 'APAC.EU': 'CH-APAC' }
+const LEGACY_DUTY_DEFAULTS = { 'US-CH': 0.03, 'CH-US': 0.10, 'CH-UK': 0, 'CH-APAC': 0.05, 'US-CA': 0 }
 export const YEAR_END_MODES = ['none', 'range', 'target']
 export const MAX_ROYALTY_RATE = 0.5
 const HISTORICAL_OPENING_POLICIES = { lrdMargin: 0.03, ffdMargin: 0.075, polandMarkup: 0.08 }
@@ -107,8 +125,6 @@ const GOODS_ROUTES = [
   ...DISTRIBUTORS.map(to => ({ from: sourceOf(to), to, policy: LRD.has(to) ? 'LRD_GOODS' : 'FFD_GOODS' })),
 ].map(route => ({ ...route, key: goodsRouteKey(route.from, route.to) }))
 const GOODS_ROUTE_KEYS = new Set(GOODS_ROUTES.map(route => route.key))
-export const CUSTOMS_ROUTES = GOODS_ROUTES.filter(route => route.key in DEFAULT_DUTY_RATES)
-  .map(({ key, from, to }) => ({ key, from, to }))
 export const TAXED_ENTITIES = ALL_COMPANIES
 const sum = values => values.reduce((total, value) => total + value, 0)
 const valueOf = (lots, field) => sum(lots.map(lot => lot.quantity * lot[field]))
@@ -122,7 +138,16 @@ const basisPoints = value => Math.round(value * 10_000)
 // A market's shock is the group-wide shock plus that market's own deviation.
 const marketShock = (shocks, id, key) => shocks[key] + (shocks.markets?.[id]?.[key] ?? 0)
 const taxRate = (config, id) => config.tax?.rates?.[id] ?? DEFAULT_TAX_RATES[id] ?? 0
-const dutyRate = (config, key) => config.customs?.rates?.[key] ?? DEFAULT_DUTY_RATES[key] ?? 0
+const dutyRate = (config, lane, family) => config.customs?.rates?.[lane]?.[family] ?? DEFAULT_DUTY_RATES[lane] ?? 0
+// The duty rate on a unit made in `origin` when one entity ships it to another.
+function importDutyRate(config, from, to, family, origin) {
+  const importer = customsBlock(to)
+  if (importer === customsBlock(from) || importer === origin) return 0
+  return dutyRate(config, importer + '.' + origin, family)
+}
+const dutyRates = pick => Object.fromEntries(CUSTOMS_LANES.map(({ key }) => [
+  key, Object.fromEntries(FAMILIES.map(family => [family, pick(key, family)])),
+]))
 
 export function createConfig() {
   return {
@@ -138,7 +163,7 @@ export function createConfig() {
     annualOperatingMargin: DEFAULT_ANNUAL_MARGIN,
     rd: { salesRate: DEFAULT_RD_RATE, usShare: 0.5 },
     tax: { rates: { ...DEFAULT_TAX_RATES } },
-    customs: { rates: { ...DEFAULT_DUTY_RATES } },
+    customs: { rates: dutyRates(key => DEFAULT_DUTY_RATES[key]) },
     // Optional rule: no goods transfer price may fall below standard cost plus this markup.
     priceFloor: { enabled: false, markup: 0.05 },
     startingPriceMethod: 'fifo-policy',
@@ -168,6 +193,13 @@ export function upgradeConfig(config, started) {
     if (Number.isFinite(target) && (target < low || target > high)) {
       upgraded.ranges = { ...upgraded.ranges, [kind]: { low: Math.min(low, target), high: Math.max(high, target) } }
     }
+  }
+  // Duty rates saved by goods route become rates by importing block, origin and product line.
+  const savedDuty = upgraded.customs?.rates
+  if (savedDuty && !CUSTOMS_LANES.some(({ key }) => key in savedDuty)) {
+    const untouched = Object.entries(LEGACY_DUTY_DEFAULTS).every(([route, rate]) => savedDuty[route] === rate)
+    upgraded.customs = !started && untouched ? defaults.customs
+      : { rates: dutyRates(key => savedDuty[LEGACY_DUTY_ROUTES[key]] ?? DEFAULT_DUTY_RATES[key]) }
   }
   // A scenario that has not started and still holds an earlier default takes the current one.
   if (!started && upgraded.rd.salesRate === DEFAULT_RD_RATE
@@ -272,15 +304,16 @@ function validateConfig(config) {
   if (fixedShare !== undefined && (!Number.isFinite(fixedShare) || fixedShare < 0 || fixedShare > 1)) {
     throw new RangeError('The fixed share of Poland\'s conversion cost must be between 0% and 100%.')
   }
-  for (const [rates, keys, label] of [
-    [config.tax?.rates, TAXED_ENTITIES, 'income tax rate'], [config.customs?.rates, CUSTOMS_ROUTES.map(route => route.key), 'customs duty rate'],
-  ]) {
-    if (rates === undefined) continue
-    for (const key of keys) {
-      if (!Number.isFinite(rates[key]) || rates[key] < 0 || rates[key] >= 1) {
-        throw new RangeError(`Each ${label} must be between 0% and less than 100%.`)
-      }
-    }
+  const taxRates = config.tax?.rates
+  if (taxRates !== undefined && TAXED_ENTITIES.some(id => !Number.isFinite(taxRates[id]) || taxRates[id] < 0 || taxRates[id] >= 1)) {
+    throw new RangeError('Each income tax rate must be between 0% and less than 100%.')
+  }
+  const duties = config.customs?.rates
+  if (duties !== undefined && CUSTOMS_LANES.some(({ key }) => FAMILIES.some((family) => {
+    const rate = duties[key]?.[family]
+    return !Number.isFinite(rate) || rate < 0 || rate >= 1
+  }))) {
+    throw new RangeError('Each customs duty rate must be between 0% and less than 100%.')
   }
   for (const [id, mode] of Object.entries(config.yearEnd ?? {})) {
     if (!TESTED_PARTIES.includes(id) || !YEAR_END_MODES.includes(mode)) throw new RangeError('Unknown year-end adjustment choice.')
@@ -318,8 +351,9 @@ function serviceFeesForMonth(config, month, initial) {
   return revision ? { ...initial, ...revision.fees } : initial
 }
 
-function makeLot(quantity, unitValue, unitGroupCost, unitMaterialCost, vintage) {
-  return { quantity, unitValue, unitGroupCost, unitMaterialCost, vintage }
+// `origin` is the customs block where the goods were made. It travels with the lot.
+function makeLot(quantity, unitValue, unitGroupCost, unitMaterialCost, vintage, origin) {
+  return { quantity, unitValue, unitGroupCost, unitMaterialCost, vintage, origin }
 }
 
 class Stock {
@@ -382,9 +416,18 @@ function distributorCostRate(market) {
   return LRD.has(market) ? DISTRIBUTOR_COST_RATE.lrd : DISTRIBUTOR_COST_RATE.ffd
 }
 
-function distributorUnitTp(product, market, policies) {
+// What a unit may cost a distributor, landed, to leave its target margin after its own expenses.
+function distributorLandedCost(product, market, policies) {
   const rate = LRD.has(market) ? policies.lrdMargin : policies.ffdMargin
   return Math.max(0, basePrice(product, market) * (1 - rate - distributorCostRate(market)))
+}
+
+// The policy transfer price is the landed cost less the import duty the distributor pays
+// on top of the price. The plan assumes goods from the supplier's own plant.
+function distributorUnitTp(family, market, config, policies = config.policies) {
+  const supplier = sourceOf(market)
+  const duty = importDutyRate(config, supplier, market, family, customsBlock(supplier))
+  return distributorLandedCost(PRODUCTS[family], market, policies) / (1 + duty)
 }
 
 // The supplier's standard cost of a unit: budget materials and conversion, plus the
@@ -417,31 +460,37 @@ function atLeastFloor(prices, floors) {
   ]))
 }
 
-function standardGoodsPrices(policies, costScale) {
+function standardGoodsPrices(config, costScale) {
+  const { policies } = config
   return Object.fromEntries(GOODS_ROUTES.map(({ key, from, to, markup }) => [
     key, Object.fromEntries(FAMILIES.map(family => {
       const product = PRODUCTS[family]
       const price = markup ? standardUnitCost(from, product, policies) * costScale * (1 + policies[markup])
-        : distributorUnitTp(product, to, policies)
+        : distributorUnitTp(family, to, config)
       return [family, roundCurrency(price)]
     })),
   ]))
 }
 
-function seedOpeningStock(costScale) {
-  // Opening distributor invoice values use the 2026 policy assumptions. Group
-  // cost follows the scenario's consolidated budget calibration.
+function seedOpeningStock(costScale, config) {
+  // Opening distributor values are landed costs under the 2026 policy assumptions: the
+  // invoice price plus any import duty paid on it. Group cost follows the scenario's
+  // consolidated budget calibration and carries the same duty.
   const historical = HISTORICAL_OPENING_POLICIES
   const stock = new Stock()
   for (const family of FAMILIES) {
     const product = PRODUCTS[family]
     for (const market of DISTRIBUTORS) {
       const cost = baseGroupCost(product, sourceOf(market)) * costScale
-      const tp = distributorUnitTp(product, market, historical)
+      const tp = distributorLandedCost(product, market, historical)
       const bin = stock.bin(market, market, family)
+      const origin = customsBlock(sourceOf(market))
+      const rate = importDutyRate(config, sourceOf(market), market, family, origin)
+      // The duty inside a landed cost.
+      const duty = landed => landed * rate / (1 + rate)
       bin.lots = [
-        makeLot(product.demand[market], tp * 0.97, cost * 0.98, product.material * costScale * 0.98, '2026-11'),
-        makeLot(product.demand[market], tp, cost, product.material * costScale, '2026-12'),
+        makeLot(product.demand[market], tp * 0.97, cost * 0.98 + duty(tp * 0.97), product.material * costScale * 0.98, '2026-11', origin),
+        makeLot(product.demand[market], tp, cost + duty(tp), product.material * costScale, '2026-12', origin),
       ]
     }
     const swissDemand = sum(MARKETS.filter(id => id !== 'US' && id !== 'CA').map(id => product.demand[id]))
@@ -449,14 +498,14 @@ function seedOpeningStock(costScale) {
     const local = cost + product.plConversion * costScale * historical.polandMarkup
     const warehouse = stock.bin('CH', 'BE', family)
     warehouse.lots = [0.96, 0.98, 0.99, 1].map((factor, index) =>
-      makeLot(swissDemand, local * factor, cost * factor, product.material * costScale * factor, '2026-' + String(9 + index).padStart(2, '0')))
+      makeLot(swissDemand, local * factor, cost * factor, product.material * costScale * factor, '2026-' + String(9 + index).padStart(2, '0'), 'EU'))
     const us = stock.bin('US', 'US', family)
     const usCost = baseGroupCost(product, 'US') * costScale
-    us.lots = [makeLot(product.demand.US + product.demand.CA, usCost, usCost, product.material * costScale, '2026-12')]
+    us.lots = [makeLot(product.demand.US + product.demand.CA, usCost, usCost, product.material * costScale, '2026-12', 'US')]
     for (const [stage, months] of [['raw', 0.35], ['wip', 0.15]]) {
       const bin = stock.bin('CH', 'PL', family, stage)
       const material = product.material * costScale
-      bin.lots = [makeLot(Math.round(swissDemand * months), material, material, material, '2026-12')]
+      bin.lots = [makeLot(Math.round(swissDemand * months), material, material, material, '2026-12', 'EU')]
     }
   }
   return stock
@@ -467,6 +516,9 @@ class Ledger {
     this.month = month
     this.journal = []
     this.transactions = []
+    // Customs duty charged on this month's imports, and on a year-end adjustment.
+    this.duties = []
+    this.dutyAdjustments = {}
     this.sequence = 0
   }
 
@@ -480,9 +532,9 @@ class Ledger {
     )
   }
 
-  transfer({ from, to, category, policy, product = null, quantity = 0, amount, buyerAccount, basis = null, external = false }) {
+  transfer({ from, to, category, policy, product = null, quantity = 0, amount, buyerAccount, basis = null, external = false, origins = null }) {
     const id = `T${this.month}-${++this.sequence}`
-    this.transactions.push({ id, from, to, category, policy, product, quantity, amount, basis, external })
+    this.transactions.push({ id, from, to, category, policy, product, quantity, amount, basis, external, ...(origins ? { origins } : {}) })
     const revenueAccount = policy === 'RD_SERVICES' ? 'intercompanyRDRevenue' : {
       goods: 'intercompanyGoodsRevenue', services: 'intercompanyServicesRevenue', royalty: 'intercompanyRoyaltyRevenue',
     }[category]
@@ -567,7 +619,7 @@ function produceInUs(stock, book, family, plan, usUnits, shocks, vintage, costSc
   const product = PRODUCTS[family]
   const material = product.material * costScale * (1 + shocks.materialCost)
   const cost = material + product.usConversion * costScale
-  stock.receive(plan.us, [makeLot(usUnits, cost, cost, material, vintage)])
+  stock.receive(plan.us, [makeLot(usUnits, cost, cost, material, vintage, 'US')])
   book.post('US', 'inventory', 'externalClearing', usUnits * cost)
 }
 
@@ -607,7 +659,7 @@ function tollInPoland(stock, book, plans, plUnits, shocks, config, vintage, cost
     const raw = stock.bin('CH', 'PL', family, 'raw')
     const wip = stock.bin('CH', 'PL', family, 'wip')
     // Replenish the raw and material-only WIP buffers as conversion completes.
-    stock.receive(raw, [makeLot(units, material, material, material, vintage)])
+    stock.receive(raw, [makeLot(units, material, material, material, vintage, 'EU')])
     book.post('CH', 'inventory', 'externalClearing', units * material)
     stock.receive(wip, stock.issue(raw, units))
     const completed = stock.issue(wip, units)
@@ -618,35 +670,55 @@ function tollInPoland(stock, book, plans, plUnits, shocks, config, vintage, cost
       quantity: units, amount: charge * share, basis: cost * share, buyerAccount: 'inventory',
     })
     stock.receive(plan.warehouse, completed.map(lot => makeLot(
-      lot.quantity, lot.unitValue + charge * share / units, lot.unitGroupCost + cost * share / units, lot.unitMaterialCost, vintage,
+      lot.quantity, lot.unitValue + charge * share / units, lot.unitGroupCost + cost * share / units, lot.unitMaterialCost, vintage, lot.origin,
     )))
   })
   return result
 }
 
-function deliver(stock, book, { lots, from, to, target, family, policy, priceLot, vintage }) {
+function deliver(stock, book, config, { lots, from, to, target, family, policy, priceLot, vintage }) {
   const quantity = unitsOf(lots)
   if (!quantity) return
-  const received = lots.map(lot => makeLot(lot.quantity, priceLot(lot), lot.unitGroupCost, lot.unitMaterialCost, vintage))
+  // The invoice value by where the goods were made. Customs duty depends on it.
+  const origins = {}
+  let invoiced = 0
+  let dutyPaid = 0
+  const received = lots.map((lot) => {
+    const price = priceLot(lot)
+    const value = lot.quantity * price
+    const rate = importDutyRate(config, from, to, family, lot.origin)
+    const importer = customsBlock(to)
+    origins[lot.origin] = (origins[lot.origin] ?? 0) + value
+    invoiced += value
+    // Every import is declared, whether or not its rate is zero.
+    if (importer !== customsBlock(from) && importer !== lot.origin) {
+      book.duties.push({ importer, origin: lot.origin, product: family, value, rate, duty: rate * value })
+      dutyPaid += rate * value
+    }
+    // The importer pays the duty on top of the price. It is part of what the goods cost,
+    // for the importer and for the group, and reaches cost of sales when they are sold.
+    return makeLot(lot.quantity, price * (1 + rate), lot.unitGroupCost + price * rate, lot.unitMaterialCost, vintage, lot.origin)
+  })
   stock.receive(target, received)
   book.transfer({
     from, to, category: 'goods', policy, product: family, quantity,
-    amount: valueOf(received, 'unitValue'), basis: valueOf(lots, 'unitValue'), buyerAccount: 'inventory',
+    amount: invoiced, basis: valueOf(lots, 'unitValue'), buyerAccount: 'inventory', origins,
   })
+  book.post(to, 'inventory', 'externalClearing', dutyPaid)
   book.post(from, 'cogs', 'inventory', valueOf(lots, 'unitValue'))
 }
 
-function moveGoods(stock, book, plans, vintage, priceTable) {
+function moveGoods(stock, book, plans, vintage, priceTable, config) {
   for (const family of FAMILIES) {
     const plan = plans[family]
     const fixedPrice = (from, to) => priceTable[goodsRouteKey(from, to)][family]
     const usLots = stock.issue(plan.us, plan.usToSwiss)
     const swissLots = stock.issue(plan.warehouse, plan.swissToUs)
-    deliver(stock, book, {
+    deliver(stock, book, config, {
       lots: usLots, from: 'US', to: 'CH', target: plan.warehouse, family, policy: 'US_TO_CH',
       priceLot: () => fixedPrice('US', 'CH'), vintage,
     })
-    deliver(stock, book, {
+    deliver(stock, book, config, {
       lots: swissLots, from: 'CH', to: 'US', target: plan.us, family, policy: 'CH_TO_US',
       priceLot: () => fixedPrice('CH', 'US'), vintage,
     })
@@ -657,7 +729,7 @@ function moveGoods(stock, book, plans, vintage, priceTable) {
       const allocations = allocate([direct, ...requested], unitsOf(source.lots))
       plan.demandAllocation ??= {}
       plan.demandAllocation[supplier] = allocations[0]
-      markets.forEach((market, index) => deliver(stock, book, {
+      markets.forEach((market, index) => deliver(stock, book, config, {
         lots: stock.issue(source, allocations[index + 1]), from: supplier, to: market,
         target: stock.bin(market, market, family), family, policy: LRD.has(market) ? 'LRD_GOODS' : 'FFD_GOODS',
         priceLot: () => fixedPrice(supplier, market), vintage,
@@ -785,9 +857,17 @@ function yearEndAdjustments(book, config, { months: priorMonths, floors, statRat
     // it can go no further than the gap between the year's invoices and their floor value.
     const headroom = floors && !service ? floorCurrency(sum(invoices.filter(invoice => invoice.to === id).map(invoice =>
       invoice.amount - invoice.quantity * floors[goodsRouteKey(invoice.from, id)][invoice.product]))) : Infinity
-    // For a distributor: profit above what the level allows, paid to its supplier.
-    // For a service provider: the fee still owed to reach the level, paid by its customers.
-    const needed = level => roundCurrency((before.profit - level * before.base) * (service ? -1 : 1))
+    // An upward adjustment into another customs block raises the declared value of the
+    // year's imports. The distributor pays duty on the increase. A credit earns no refund.
+    const dutyRate = service ? 0 : yearDutyRate(id, priorMonths, book)
+    const dutyOn = amount => dutyRate * Math.max(0, amount)
+    // For a distributor: profit above what the level allows, paid to its supplier, less
+    // the duty the payment itself attracts. For a service provider: the fee still owed
+    // to reach the level, paid by its customers.
+    const needed = (level) => {
+      const gap = before.profit - level * before.base
+      return roundCurrency(service ? -gap : gap > 0 ? gap / (1 + dutyRate) : gap)
+    }
     const wanted = {
       target: needed(range.target),
       range: statusBefore === 'within' ? 0 : needed(statusBefore === 'below' ? range.low : range.high),
@@ -807,14 +887,20 @@ function yearEndAdjustments(book, config, { months: priorMonths, floors, statRat
       book.transfer({
         from: sourceOf(id), to: id, category: 'goods', policy: 'YEAR_END_ADJUSTMENT', amount, buyerAccount: 'cogs',
       })
+      if (customsBlock(id) !== customsBlock(sourceOf(id))) {
+        book.dutyAdjustments[customsBlock(id)] = { amount, rate: dutyRate, duty: dutyOn(amount) }
+        book.post(id, 'cogs', 'externalClearing', dutyOn(amount))
+      }
     }
-    const after = margin(before.profit + (service ? amount : -amount), before.base)
+    const duty = service ? 0 : dutyOn(amount)
+    const after = margin(before.profit + (service ? amount : -amount - duty), before.base)
     return {
       id, service, counterparty: service ? Object.keys(serviceCustomers(id)) : [sourceOf(id)], mode, amount, toTarget, toRange, ...range,
       floorLimited: { target: toTarget !== wanted.target, range: toRange !== wanted.range },
       revenue: before.revenue, statRate: statRates?.[id] ?? 0, statAdjustment,
       gaapBefore: gaap.indicator, marginBefore: before.indicator, statusBefore,
-      gaapAfter: margin(gaap.profit + (service ? amount : -amount), gaap.base),
+      duty, dutyRate, dutyToTarget: dutyOn(toTarget), dutyToRange: dutyOn(toRange),
+      gaapAfter: margin(gaap.profit + (service ? amount : -amount - duty), gaap.base),
       marginAfter: after, statusAfter: rangeStatus(after, range),
     }
   })
@@ -846,19 +932,40 @@ function taxFor(config, entities, stat = null) {
   return { entities: byEntity, total, profit, effectiveRate: profit ? total / profit : 0 }
 }
 
-// Duty is charged on the declared transfer price of goods that cross a customs border.
-// It is reported beside the results and is not charged to operating profit.
-function customsFor(config, transactions) {
-  const routes = Object.fromEntries(CUSTOMS_ROUTES.map(({ key, from, to }) => {
-    const rate = dutyRate(config, key)
-    const invoices = transactions.filter(transaction =>
-      !transaction.external && transaction.category === 'goods' && transaction.from === from && transaction.to === to)
-    const value = sum(invoices.filter(invoice => invoice.policy !== 'YEAR_END_ADJUSTMENT').map(invoice => invoice.amount))
-    // An upward year-end adjustment raises the declared value. No refund is assumed for a credit.
-    const adjustment = Math.max(0, sum(invoices.filter(invoice => invoice.policy === 'YEAR_END_ADJUSTMENT').map(invoice => invoice.amount)))
-    return [key, { from, to, rate, value, adjustment, duty: rate * (value + adjustment) }]
-  }))
-  return { routes, total: sum(Object.values(routes).map(route => route.duty)) }
+const emptyLanes = config => Object.fromEntries(CUSTOMS_LANES.map(({ key, importer, origin }) => [key, {
+  importer, origin, value: 0, duty: 0,
+  products: Object.fromEntries(FAMILIES.map(family => [family, { rate: dutyRate(config, key, family), value: 0, duty: 0 }])),
+}]))
+
+// Duty is charged on the declared transfer price each time goods enter a customs block
+// from another one. The rate depends on the importing block, the product line and where
+// the goods were made. The importer adds it to the cost of the goods, so it reaches cost
+// of sales when they are sold. This is the duty charged in the month, by lane.
+function customsFor(config, book) {
+  const lanes = emptyLanes(config)
+  for (const { importer, origin, product, value, duty } of book.duties) {
+    const lane = lanes[importer + '.' + origin]
+    lane.products[product].value += value
+    lane.products[product].duty += duty
+    lane.value += value
+    lane.duty += duty
+  }
+  const adjustments = book.dutyAdjustments
+  const adjustmentDuty = sum(Object.values(adjustments).map(entry => entry.duty))
+  return { lanes, adjustments, adjustmentDuty, total: sum(Object.values(lanes).map(lane => lane.duty)) + adjustmentDuty }
+}
+
+// The average duty rate on everything a distributor imported this year. A year-end
+// adjustment changes what was paid for all of it, so it takes this rate.
+function yearDutyRate(id, priorMonths, book) {
+  const importer = customsBlock(id)
+  if (importer === customsBlock(sourceOf(id))) return 0
+  const imports = [
+    ...priorMonths.flatMap(month => Object.values(month.customs.lanes)).filter(lane => lane.importer === importer),
+    ...book.duties.filter(entry => entry.importer === importer),
+  ]
+  const value = sum(imports.map(entry => entry.value))
+  return value ? sum(imports.map(entry => entry.duty)) / value : 0
 }
 
 /** Third-party sales and group cost of sales by product line for a closed month. */
@@ -874,16 +981,26 @@ export function productLineResults(month) {
 /** Total income tax and customs duty for a set of closed months. */
 export function summarizeTaxAndCustoms(config, months) {
   const entities = Object.fromEntries(TAXED_ENTITIES.map(id => [id, rollupPnl(months.map(month => month.entities[id]))]))
-  const routes = Object.fromEntries(CUSTOMS_ROUTES.map(({ key, from, to }) => {
-    const entries = months.map(month => month.customs.routes[key])
-    return [key, {
-      from, to, rate: dutyRate(config, key), value: sum(entries.map(entry => entry.value)),
-      adjustment: sum(entries.map(entry => entry.adjustment)), duty: sum(entries.map(entry => entry.duty)),
-    }]
-  }))
+  const lanes = emptyLanes(config)
+  for (const month of months) {
+    for (const [key, lane] of Object.entries(month.customs.lanes)) {
+      lanes[key].value += lane.value
+      lanes[key].duty += lane.duty
+      for (const family of FAMILIES) {
+        lanes[key].products[family].value += lane.products[family].value
+        lanes[key].products[family].duty += lane.products[family].duty
+      }
+    }
+  }
+  // Year-end adjustments exist only in the December close.
+  const adjustments = Object.assign({}, ...months.map(month => month.customs.adjustments))
+  const adjustmentDuty = sum(months.map(month => month.customs.adjustmentDuty))
   // A full year of actuals carries the statutory results. Tax then follows them.
   const stat = months.length === 12 ? months[11].stat ?? null : null
-  return { tax: taxFor(config, entities, stat), customs: { routes, total: sum(Object.values(routes).map(route => route.duty)) } }
+  return {
+    tax: taxFor(config, entities, stat),
+    customs: { lanes, adjustments, adjustmentDuty, total: sum(months.map(month => month.customs.total)) },
+  }
 }
 
 function balances(book, stock, sales, entities, accounts) {
@@ -902,7 +1019,9 @@ function balances(book, stock, sales, entities, accounts) {
   // In a month with no output there are no goods to carry it, and it is expensed.
   const uncapitalizedConversion = book.uncapitalizedConversion ?? 0
   const capitalizedPolandConversion = (accounts.PL.operatingExpenses ?? 0) - uncapitalizedConversion
-  const consolidated = pnl(sum(sales.map(sale => sale.revenue)), sum(sales.map(sale => sale.groupCogs)),
+  // Duty on a year-end adjustment is paid to customs and expensed at once. Every other
+  // cost of sales reaches the group through the goods sold.
+  const consolidated = pnl(sum(sales.map(sale => sale.revenue)), sum(sales.map(sale => sale.groupCogs)) + externalExpenses('cogs'),
     externalExpenses('operatingExpenses') + uncapitalizedConversion, externalExpenses('rdExpense'))
   const entityProfit = sum(Object.values(entities).map(entity => entity.operatingProfit))
   const eliminations = {
@@ -952,7 +1071,7 @@ function closeMonth(stock, config, month, shocks, priceTable, costScale, fees = 
   }]))
   FAMILIES.forEach((family, index) => produceInUs(stock, book, family, plans[family], usUnits[index], shocks, vintage, costScale))
   const poland = tollInPoland(stock, book, plans, plUnits, shocks, config, vintage, costScale, fees?.PL)
-  moveGoods(stock, book, plans, vintage, priceTable)
+  moveGoods(stock, book, plans, vintage, priceTable, config)
   const sales = sellGoods(stock, book, plans, shocks)
   const { royaltyBase, india } = bookOtherCosts(book, stock, sales, config, shocks, fees?.IN)
   bookResearch(book, sum(sales.map(sale => sale.revenue)), config.rd)
@@ -965,7 +1084,7 @@ function closeMonth(stock, config, month, shocks, priceTable, costScale, fees = 
   }
   return {
     month, shocks, entities, sales, capacity, royaltyBase, costScale, ...financials, services: { PL: poland, IN: india },
-    tax: taxFor(config, entities), customs: customsFor(config, book.transactions), ...(yearEnd ? { yearEnd, stat } : {}),
+    tax: taxFor(config, entities), customs: customsFor(config, book), ...(yearEnd ? { yearEnd, stat } : {}),
     transactions: book.transactions, journal: book.journal,
   }
 }
@@ -1013,61 +1132,91 @@ function rollupPnl(months) {
 
 function budgetAtCost(config, months, costScale, prices, fees = null) {
   if (!months) return []
-  const stock = seedOpeningStock(costScale)
+  const stock = seedOpeningStock(costScale, config)
   return Array.from({ length: months }, (_, index) => closeMonth(stock, config, index + 1, ZERO_SHOCK, prices, costScale, fees))
 }
 
-function calibratedCostScale(target, reference) {
-  if (target === undefined) return 1
-  const { revenue, cogs, operatingExpenses } = rollupPnl(reference.map(month => month.consolidated))
-  const allowableCogs = revenue * (1 - target) - operatingExpenses
-  if (allowableCogs < -1e-8) {
-    const ceiling = (Math.floor(10_000 * (1 - operatingExpenses / revenue)) / 100).toFixed(2)
-    throw new RangeError(`The target would require negative COGS. With these settings the maximum consolidated margin is ${ceiling}%.`)
-  }
-  const ratio = Math.max(0, allowableCogs) / cogs
-  return Math.abs(ratio - 1) < 1e-12 ? 1 : ratio
+const consolidatedMargin = (months) => {
+  const { revenue, operatingProfit } = rollupPnl(months.map(month => month.consolidated))
+  return operatingProfit / revenue
 }
 
 function scenarioBudget(config, months = 0) {
-  const { policies, annualOperatingMargin, startingPriceMethod } = config
-  const provisional = standardGoodsPrices(policies, 1)
+  const { policies, annualOperatingMargin: target, startingPriceMethod } = config
+  const provisional = standardGoodsPrices(config, 1)
   const openingPriceMethod = startingPriceMethod ?? 'legacy'
   const calibrateDistributorPrices = openingPriceMethod === 'fifo-policy'
   // The reference year runs at unscaled cost with services at cost plus. It gives the
-  // budgeted service costs that the fixed monthly fees are set from.
+  // budgeted service costs that the fixed monthly fees are set from, and the forecast
+  // the distributors' starting prices are set against.
   const reference = budgetAtCost(config, 12, 1, provisional)
-  const costScale = calibratedCostScale(annualOperatingMargin, reference)
-  const budgetServiceCost = {
-    PL: sum(reference.map(month => month.services.PL.cost)) * costScale / 12,
-    IN: sum(reference.map(month => month.services.IN.cost)) / 12,
-  }
-  const initialFees = {
-    PL: roundCurrency(budgetServiceCost.PL * (1 + policies.polandMarkup)),
-    IN: roundCurrency(budgetServiceCost.IN * (1 + policies.indiaServicesMarkup)),
-  }
-  const costs = standardCosts(policies, costScale)
-  const floors = priceFloors(config, costs)
-  let initial = costScale === 1 ? { ...provisional } : standardGoodsPrices(policies, costScale)
-  const openingNotes = {}
-
-  if (calibrateDistributorPrices) {
-    for (const route of GOODS_ROUTES.filter(route => !route.markup)) {
-      const { key, to } = route
-      const target = policies[LRD.has(to) ? 'lrdMargin' : 'ffdMargin']
-      const planned = testedPnl(rollupPnl(reference.map(month => month.entities[to])))
-      const { recommended, note } = distributorQuote(route, reference, planned, 1, provisional[key], provisional[key], target, floors?.[key])
-      const prices = Object.fromEntries(FAMILIES.map(family => [
-        family, recommended?.[family] ?? provisional[key][family],
-      ]))
-      initial[key] = prices
-      if (note) openingNotes[key] = note
+  const referenceCost = id => sum(reference.map(month => month.services[id].cost)) / 12
+  // Everything that follows from a level of unit cost: fees, floors, starting prices and the budget year.
+  const plan = (costScale) => {
+    const budgetServiceCost = { PL: referenceCost('PL') * costScale, IN: referenceCost('IN') }
+    const initialFees = {
+      PL: roundCurrency(budgetServiceCost.PL * (1 + policies.polandMarkup)),
+      IN: roundCurrency(budgetServiceCost.IN * (1 + policies.indiaServicesMarkup)),
+    }
+    const costs = standardCosts(policies, costScale)
+    const floors = priceFloors(config, costs)
+    let initial = costScale === 1 ? { ...provisional } : standardGoodsPrices(config, costScale)
+    const openingNotes = {}
+    // The policy prices a floor replaces, and whether it puts a distributor's target out of reach.
+    const unfloored = {}
+    const openingShort = {}
+    if (calibrateDistributorPrices) {
+      for (const route of GOODS_ROUTES.filter(route => !route.markup)) {
+        const { key, to } = route
+        const margin = policies[LRD.has(to) ? 'lrdMargin' : 'ffdMargin']
+        const planned = testedPnl(rollupPnl(reference.map(month => month.entities[to])))
+        const quote = (floor) => distributorQuote(config, route, reference, planned, 1, provisional[key], provisional[key], margin, floor)
+        const { recommended, note, short } = quote(floors?.[key])
+        initial[key] = Object.fromEntries(FAMILIES.map(family => [family, recommended?.[family] ?? provisional[key][family]]))
+        if (note) openingNotes[key] = note
+        if (floors) {
+          unfloored[key] = quote(null).recommended ?? null
+          openingShort[key] = Boolean(short)
+        }
+      }
+    }
+    initial = atLeastFloor(initial, floors)
+    const year = budgetAtCost(config, 12, costScale, initial, initialFees)
+    return {
+      costScale, initial, openingNotes, unfloored, openingShort, costs, floors, initialFees, budgetServiceCost, year,
+      gap: consolidatedMargin(year) - target,
     }
   }
-  initial = atLeastFloor(initial, floors)
 
-  const budget = budgetAtCost(config, months, costScale, initial, initialFees)
-  return { costScale, initial, openingNotes, openingPriceMethod, budget, costs, floors, initialFees, budgetServiceCost }
+  // Unit costs are scaled until the budget year earns the target margin. Customs duty
+  // is charged on transfer prices and does not all move with unit cost, so the scale is
+  // found by trial: the margin falls in a straight line as costs rise, unless a price floor bends it.
+  let chosen = plan(1)
+  if (target !== undefined && Math.abs(chosen.gap) >= 1e-12) {
+    let previous = chosen
+    const { revenue, cogs, operatingExpenses } = rollupPnl(chosen.year.map(month => month.consolidated))
+    let scale = Math.max(0, revenue * (1 - target) - operatingExpenses) / cogs
+    if (Math.abs(scale - 1) < 1e-6) scale = 0.9
+    for (let attempt = 0; attempt < 20; attempt++) {
+      chosen = plan(scale)
+      if (Math.abs(chosen.gap) < 1e-12) break
+      const slope = (chosen.gap - previous.gap) / (chosen.costScale - previous.costScale)
+      const next = chosen.costScale - chosen.gap / slope
+      if (!(next > 0)) {
+        // Even free goods would not reach the target: other costs alone take the margin below it.
+        const atZeroCost = chosen.gap - slope * chosen.costScale + target
+        if (atZeroCost < target - 1e-10) {
+          throw new RangeError(`The target would require negative COGS. With these settings the maximum consolidated margin is ${(Math.floor(10_000 * atZeroCost) / 100).toFixed(2)}%.`)
+        }
+        chosen = plan(0)
+        break
+      }
+      previous = chosen
+      scale = next
+    }
+  }
+  const { year, gap, ...rest } = chosen
+  return { ...rest, openingPriceMethod, budget: year.slice(0, months) }
 }
 
 function summarizeEntityResults(actual, forecast, config) {
@@ -1194,19 +1343,25 @@ function floorNote(held, short = false) {
     : `Held at the price floor: ${names}.`
 }
 
-function distributorQuote(route, forecast, fullYear, startMonth, current, standard, target, floor = null) {
+function distributorQuote(config, route, forecast, fullYear, startMonth, current, standard, target, floor = null) {
   const vintage = '2027-' + String(startMonth).padStart(2, '0')
   const positions = forecast.flatMap(month => month.inventory.filter(bin => bin.owner === route.to))
   // Only issues from future receipts can change this year's cost of goods sold.
-  const adjustableUnits = Object.fromEntries(positions.reduce((units, bin) => {
-    const newIssues = bin.issues.filter(lot => lot.vintage >= vintage)
-    units.set(bin.product, (units.get(bin.product) ?? 0) + unitsOf(newIssues))
-    return units
-  }, new Map()))
+  const adjustableUnits = Object.fromEntries(FAMILIES.map(family => [family, 0]))
+  // Each of those units costs the distributor its price plus any import duty on it.
+  // `landed` is that cost per dollar of price, averaged over where the units were made.
+  const landedUnits = Object.fromEntries(FAMILIES.map(family => [family, 0]))
+  for (const bin of positions) {
+    for (const lot of bin.issues.filter(issue => issue.vintage >= vintage)) {
+      adjustableUnits[bin.product] += lot.quantity
+      landedUnits[bin.product] += lot.quantity * (1 + importDutyRate(config, route.from, route.to, bin.product, lot.origin))
+    }
+  }
+  const landed = Object.fromEntries(FAMILIES.map(family => [family, adjustableUnits[family] ? landedUnits[family] / adjustableUnits[family] : 1]))
   const units = sum(Object.values(adjustableUnits))
   if (!units) return { note: 'No sales are forecast from inventory received at new prices this year.' }
 
-  const adjustableCogs = sum(FAMILIES.map(family => adjustableUnits[family] * current[family]))
+  const adjustableCogs = sum(FAMILIES.map(family => adjustableUnits[family] * current[family] * landed[family]))
   const fixedCogs = fullYear.cogs - adjustableCogs
   const costAllowance = fullYear.revenue * (1 - target) - fullYear.operatingExpenses - fixedCogs
   const allowance = Math.max(0, costAllowance)
@@ -1218,10 +1373,10 @@ function distributorQuote(route, forecast, fullYear, startMonth, current, standa
   let short = false
   for (;;) {
     const free = sold.filter(family => !held.has(family))
-    const remaining = allowance - sum([...held].map(family => adjustableUnits[family] * floor[family]))
+    const remaining = allowance - sum([...held].map(family => adjustableUnits[family] * floor[family] * landed[family]))
     short = held.size > 0 && !free.length && remaining < -0.005
-    const freeStandard = sum(free.map(family => adjustableUnits[family] * standard[family]))
-    const freeUnits = sum(free.map(family => adjustableUnits[family]))
+    const freeStandard = sum(free.map(family => adjustableUnits[family] * standard[family] * landed[family]))
+    const freeUnits = sum(free.map(family => adjustableUnits[family] * landed[family]))
     prices = Object.fromEntries(free.map(family => [
       family, freeStandard ? standard[family] * Math.max(0, remaining) / freeStandard : Math.max(0, remaining) / freeUnits,
     ]))
@@ -1235,17 +1390,38 @@ function distributorQuote(route, forecast, fullYear, startMonth, current, standa
   const note = costAllowance < 0
     ? 'The full-year target is out of reach at any nonnegative price because of costs already incurred or carried in.'
     : floorNote([...held], short)
-  return { recommended, note, held: [...held] }
+  return { recommended, note, held: [...held], short: costAllowance < 0 || short }
+}
+
+/**
+ * Goods prices in force in a month that need the player's attention: those below the
+ * supplier's standard cost, and those held at the price floor.
+ */
+export function goodsPriceAlerts(config, month) {
+  validateConfig(config)
+  validatePricingMonth(month)
+  const { initial, costs, floors } = scenarioBudget(config)
+  const prices = goodsPricesForMonth(config, month, initial)
+  const rows = GOODS_ROUTES.flatMap(({ key, from, to }) => FAMILIES.map(product => ({
+    key, from, to, product, price: prices[key][product], standardCost: costs[key][product], floor: floors?.[key][product] ?? null,
+  })))
+  return {
+    belowCost: rows.filter(row => row.price < row.standardCost),
+    atFloor: rows.filter(row => row.floor !== null && row.price <= row.floor),
+    floorMarkup: floors ? config.priceFloor.markup : null,
+  }
 }
 
 export function reviewGoodsPricing(config, revealed) {
   if (!Number.isInteger(revealed) || revealed < 0 || revealed > 12) throw new RangeError('Reveal progress must be between zero and twelve months.')
   validateConfig(config)
-  const { costScale, initial, openingNotes, openingPriceMethod, costs, floors, initialFees, budgetServiceCost } = scenarioBudget(config)
+  const {
+    costScale, initial, openingNotes, unfloored, openingShort, openingPriceMethod, costs, floors, initialFees, budgetServiceCost,
+  } = scenarioBudget(config)
   const current = goodsPricesForMonth(config, Math.min(revealed + 1, 12), initial)
   const currentFees = serviceFeesForMonth(config, Math.min(revealed + 1, 12), initialFees)
   const effectiveMonth = quarterPricingMonth(revealed)
-  const stock = seedOpeningStock(costScale)
+  const stock = seedOpeningStock(costScale, config)
   validateSimulationConfig(config.simulation)
   const pastShocks = revealed ? simulateShocks(config.simulation, revealed, MARKETS, SERVICE_PROVIDERS) : []
   const actual = []
@@ -1264,18 +1440,32 @@ export function reviewGoodsPricing(config, revealed) {
     const { key, from, to, policy, markup } = route
     const targetMargin = markup ? null : config.policies[LRD.has(to) ? 'lrdMargin' : 'ffdMargin']
     let quote = {}
+    // What the policy would ask for with no floor, where a floor is in force.
+    let withoutFloor = floors && revealed === 0 ? unfloored[key] ?? null : null
+    let floorShort = floors && revealed === 0 ? openingShort[key] ?? false : false
     if (effectiveMonth) {
       const fullYear = entityResults.find(row => row.id === to).fullYear
-      quote = markup ? crossSupplyQuote(route, forecast, config.policies, floors?.[key])
-        : distributorQuote(route, forecast, testedPnl(fullYear), effectiveMonth, current[key], initial[key], targetMargin, floors?.[key])
+      const priced = floor => markup ? crossSupplyQuote(route, forecast, config.policies, floor)
+        : distributorQuote(config, route, forecast, testedPnl(fullYear), effectiveMonth, current[key], initial[key], targetMargin, floor)
+      quote = priced(floors?.[key])
+      if (floors) {
+        withoutFloor = priced(null).recommended ?? null
+        floorShort = Boolean(quote.short)
+      }
     }
     const startingQuote = revealed === 0 && openingPriceMethod === 'fifo-policy' && !openingNotes[key] ? initial[key] : null
     return {
       key, from, to, policy, targetMargin, markup: markup ? config.policies[markup] : null, note: quote.note,
       openingNote: openingNotes[key],
+      // Products whose price in force sits at the floor, the policy price the floor replaced,
+      // and whether the floor puts the buyer's full-year target out of reach.
+      floorHeld: floors ? FAMILIES.filter(family => current[key][family] <= floors[key][family]) : [],
+      policyWithoutFloor: withoutFloor, floorShort,
       prices: FAMILIES.map(product => ({
         product, applied: current[key][product], recommended: quote.recommended?.[product] ?? startingQuote?.[product] ?? null,
         standardCost: costs[key][product], floor: floors?.[key][product] ?? null,
+        // The import duty the buyer pays on top of the price, for goods from the supplier's own plant.
+        duty: importDutyRate(config, from, to, product, customsBlock(from)),
       })),
     }
   })
@@ -1358,7 +1548,7 @@ export function applyYearEndAdjustments(config, revealed, choices = {}) {
 function runPeriod(config, months) {
   validateConfig(config)
   const { budget, costScale, initial, floors, initialFees } = scenarioBudget(config, months)
-  const actualStock = seedOpeningStock(costScale)
+  const actualStock = seedOpeningStock(costScale, config)
   const shocks = simulateShocks(config.simulation, months, MARKETS, SERVICE_PROVIDERS)
   const actual = []
   const variance = []
@@ -1381,14 +1571,16 @@ function runPeriod(config, months) {
 export function explainYear(config, { budget, actual }) {
   if (actual.length !== 12 || !actual[11].yearEnd) throw new RangeError('The year can be explained once December actuals are revealed.')
   const total = (months, pick) => sum(months.map(pick))
+  const { initial, floors } = scenarioBudget(config)
   return actual[11].yearEnd.map(entry => {
     const { id, service } = entry
     const range = policyRange(config, id)
     const planned = testedResult(id, rollupPnl(budget.map(month => month.entities[id])))
     const result = rollupPnl(actual.map(month => month.entities[id]))
     const gaap = testedResult(id, result)
-    // The true-up changes revenue for a service provider and cost of sales for a distributor.
-    const beforeTrueUp = (gaap.profit + (service ? -entry.amount : entry.amount)) / (service ? gaap.costs : gaap.revenue)
+    // The true-up changes revenue for a service provider and cost of sales for a distributor,
+    // where it also carries any customs duty it attracts.
+    const beforeTrueUp = (gaap.profit + (service ? -entry.amount : entry.amount + entry.duty)) / (service ? gaap.costs : gaap.revenue)
     const drivers = []
     const facts = { statRate: entry.statRate, statAdjustment: entry.statAdjustment }
     if (service) {
@@ -1405,13 +1597,23 @@ export function explainYear(config, { budget, actual }) {
     } else {
       const sales = actual.flatMap(month => month.sales.filter(sale => sale.seller === id))
       const atBudgetPrices = sum(sales.map(sale => sale.quantity * basePrice(PRODUCTS[sale.product], id)))
-      const costs = gaap.costs - entry.amount
+      const costs = gaap.costs - entry.amount - entry.duty
       const atBudgetPriceMargin = (atBudgetPrices - costs) / atBudgetPrices
       drivers.push({ key: 'volume', points: atBudgetPriceMargin - planned.indicator })
       drivers.push({ key: 'salesPrice', points: beforeTrueUp - atBudgetPriceMargin })
       facts.priceDeviation = gaap.revenue / atBudgetPrices - 1
       const units = months => sum(months.flatMap(month => month.sales.filter(sale => sale.seller === id).map(sale => sale.quantity)))
       facts.unitsDeviation = units(actual) / units(budget) - 1
+      if (floors) {
+        // Products whose price sat at the floor at some point in the year, and whether the
+        // floor stops a year-end credit from reaching the range.
+        const key = goodsRouteKey(sourceOf(id), id)
+        const prices = Array.from({ length: 12 }, (_, index) => goodsPricesForMonth(config, index + 1, initial)[key])
+        facts.floor = {
+          held: FAMILIES.filter(family => prices.some(table => table[family] <= floors[key][family])),
+          creditLimited: entry.floorLimited.range,
+        }
+      }
     }
     drivers.push({ key: 'yearEnd', points: gaap.indicator - beforeTrueUp })
     drivers.push({ key: 'stat', points: entry.marginAfter - gaap.indicator })
