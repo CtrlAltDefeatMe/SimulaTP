@@ -2,11 +2,12 @@ import { ENTITIES } from './engine.mjs';
 
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const rate = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 const pointsFormat = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range' };
 const driverLabels = {
   volume: 'Volume, mix and cost of goods', salesPrice: 'Sales prices', costs: 'Costs against the fixed fee',
-  fees: 'Fee changes during the year', yearEnd: 'Year-end adjustment', stat: 'US GAAP to local stat',
+  fees: 'Fee changes during the year', yearEnd: 'Year-end adjustment', stat: 'GAAP-to-stat adjustment',
 };
 // A driver smaller than this is left out of the written explanation.
 const WORTH_SAYING = 0.001;
@@ -33,7 +34,7 @@ function reasons(entry, pricesChanged) {
     },
     fees: driver => `Fee changes at the quarterly reviews ${moved(driver.points, measure)}.`,
     yearEnd: driver => `The year-end adjustment ${moved(driver.points, measure)}.`,
-    stat: driver => `Its local accounts ${facts.statRate > 0 ? 'carry' : 'leave out'} cost equal to ${rate.format(Math.abs(facts.statRate))} of its operating expenses compared with US GAAP, which ${moved(driver.points, measure)}.`,
+    stat: driver => `An unexpected GAAP-to-stat adjustment of ${dollars.format(Math.abs(facts.statAdjustment))} brought the statutory ${service ? 'cost-plus markup' : 'operating margin'} ${driver.points < 0 ? 'down' : 'up'} ${percent.format(Math.abs(driver.points))} from the US GAAP result.`,
   };
   const said = entry.drivers.filter(driver => Math.abs(driver.points) >= WORTH_SAYING)
     .sort((left, right) => Math.abs(right.points) - Math.abs(left.points));
@@ -56,8 +57,8 @@ function crossing(entry) {
   const gaapInside = basisPoints(entry.gaap) >= basisPoints(entry.low) && basisPoints(entry.gaap) <= basisPoints(entry.high);
   if (gaapInside === (entry.status === 'within')) return '';
   return gaapInside
-    ? '<p class="summary-flag">Inside the range on US GAAP. The local statutory adjustment moved it out.</p>'
-    : '<p class="summary-result">Outside the range on US GAAP. The local statutory adjustment brought it in.</p>';
+    ? '<p class="summary-flag">Inside the range on US GAAP. The GAAP-to-stat adjustment moved it out.</p>'
+    : '<p class="summary-result">Outside the range on US GAAP. The GAAP-to-stat adjustment brought it in.</p>';
 }
 
 function card(entry, pricesChanged) {
@@ -73,6 +74,14 @@ function card(entry, pricesChanged) {
     ${outside ? `<p class="summary-why"><strong>Why.</strong> ${reasons(entry, pricesChanged).map(html).join(' ')}</p>` : ''}
     ${bridge(entry)}
   </article>`;
+}
+
+// How many of the tested entities drew a GAAP-to-stat adjustment this year.
+function adjustedEntities(explanations) {
+  const count = explanations.filter(entry => entry.facts.statAdjustment).length;
+  if (!count) return 'No tested entity had a GAAP-to-stat adjustment this year, so they match the US GAAP figures you saw during the year.';
+  const all = count === explanations.length;
+  return `${all ? `All ${count}` : `${count} of the ${explanations.length}`} tested entities had an unexpected GAAP-to-stat adjustment, which only became visible at the December close.${all ? '' : ' For the others the statutory result matches US GAAP.'}`;
 }
 
 /**
@@ -97,7 +106,7 @@ export function renderYearSummary({ explanations, untouched, adjusted }) {
     <div class="summary-body">
       <p class="summary-lead">${lead}</p>
       <p>${context}${adjusted ? ' Year-end adjustments have been posted and are included.' : ' No year-end adjustment has been posted yet.'}</p>
-      <p>The range is tested on <strong>local statutory results</strong>. They differ from the US GAAP figures you saw during the year by a local adjustment that only became visible at the December close.</p>
+      <p>The range is tested on <strong>local statutory results</strong>. ${adjustedEntities(explanations)}</p>
       ${outside.length ? `<h3 class="summary-section">Outside the range</h3>${outside.map(entry => card(entry, pricesChanged)).join('')}` : ''}
       ${within.length ? `<h3 class="summary-section">Inside the range</h3>${within.map(entry => card(entry, pricesChanged)).join('')}` : ''}
     </div>

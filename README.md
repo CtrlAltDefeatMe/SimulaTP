@@ -11,11 +11,12 @@ The simulator uses a synthetic scenario. Tax and duty rates are illustrative. Sc
 - Three product lines with different profitability in every market: Control Systems high, Precision Components in the middle, Industrial Modules thin
 - Fixed monthly service fees for the Polish toll manufacturer and the Indian service center, set from budgeted cost plus the policy markup, against costs that vary each month. Part of Poland's cost is fixed overhead, so its unit cost rises when output falls
 - Arm's-length ranges for seven tested entities: the limited-risk and full-fledged distributors on operating margin, Poland and India on markup on cost
-- A US GAAP to local statutory adjustment for each entity outside the United States, drawn once for the year and revealed at the December close. The ranges and local income tax are tested on the statutory results
+- An unexpected GAAP-to-stat adjustment, revealed at the December close. Each entity outside the United States has a 50% chance of one for the year. The ranges and local income tax are tested on the statutory results
 - An opening sequence on the first load of each browser session: the bars of the TH monogram tumble into place, the PlayTP name appears, and both shrink into the brand corner. It can be skipped, does not play when reduced motion is requested, and replays with `?intro` in the address
 - An automatic full-year run at unchanged prices and fees, with a pop-up that explains each out-of-range result, and a replay of the same year
 - An optional price floor: no goods price below standard cost plus a markup
-- Quarterly reviews of goods prices and service fees, and year-end adjustments
+- Quarterly reviews of goods prices and service fees, and year-end adjustments. Each distributor holds about two months of stock on a FIFO basis, so a price change reaches its cost of sales about two months later
+- A default group that earns a consolidated operating margin in the high teens (18.7%), with a high-margin, a mid-margin and a thin-margin product line in every market
 - Income tax by entity, and customs duty on declared transfer prices as a memo
 
 Customs duty is not deducted from operating profit, and all amounts are in US dollars. There is no currency layer.

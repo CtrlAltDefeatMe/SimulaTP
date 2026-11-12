@@ -20,7 +20,8 @@ export const DEFAULT_SIMULATION = Object.freeze({
   serviceCostVariation: 0.08,
   // The year's US GAAP to local statutory adjustment, as a share of operating expenses:
   // its largest size and its average size. The direction is random.
-  statAdjustment: Object.freeze({ max: 0.10, mean: 0.03 }),
+  // An entity is adjusted with this probability. When it is, the size has this average and this ceiling.
+  statAdjustment: Object.freeze({ max: 0.10, mean: 0.03, probability: 0.5 }),
 });
 
 const shockLabels = {
@@ -98,12 +99,16 @@ function prepareConfig(config) {
   if (!Number.isFinite(serviceCostVariation) || serviceCostVariation < 0 || serviceCostVariation >= 1) {
     throw new RangeError('Service cost variation must be between 0% and less than 100%.');
   }
-  const { max = 0, mean = 0 } = config.statAdjustment ?? {};
+  // A scenario saved before the chance existed adjusted every entity.
+  const { max = 0, mean = 0, probability = 1 } = config.statAdjustment ?? {};
   if (![max, mean].every(Number.isFinite) || mean < 0 || max > 1 || mean > max || (max > 0 && mean === 0)) {
-    throw new RangeError('The local statutory adjustment needs an average above 0% and no larger than its maximum, which can be at most 100%. Enter 0% for both to switch it off.');
+    throw new RangeError('The GAAP-to-stat adjustment needs an average above 0% and no larger than its maximum, which can be at most 100%. Enter 0% for both to switch it off.');
+  }
+  if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
+    throw new RangeError('The chance of a GAAP-to-stat adjustment must be between 0% and 100%.');
   }
   return {
-    seed: String(seed), distributions, marketVariation, serviceCostVariation, statAdjustment: { max, mean },
+    seed: String(seed), distributions, marketVariation, serviceCostVariation, statAdjustment: { max, mean, probability },
     factor: factorCorrelation(config.correlation),
   };
 }
@@ -211,12 +216,15 @@ export function simulateShocks(config = DEFAULT_SIMULATION, months = 12, markets
  * adjustments near zero and has exactly the configured average. The sign is a coin toss.
  */
 export function simulateStatAdjustments(config = DEFAULT_SIMULATION, entities = []) {
-  const { seed, statAdjustment: { max, mean } } = prepareConfig(config);
+  const { seed, statAdjustment: { max, mean, probability } } = prepareConfig(config);
   const uniform = createUniformSampler(seed + '/stat');
+  // Whether an entity is adjusted at all comes from its own stream, so the sizes do not depend on the chance.
+  const chance = createUniformSampler(seed + '/stat-occurs');
   return Object.fromEntries(entities.map((id) => {
     const size = uniform();
     const side = uniform();
-    if (!max) return [id, 0];
+    const occurs = chance() < probability;
+    if (!max || !occurs) return [id, 0];
     const magnitude = max * (1 - (1 - size) ** (mean / (max - mean)));
     return [id, side < 0.5 ? -magnitude : magnitude];
   }));

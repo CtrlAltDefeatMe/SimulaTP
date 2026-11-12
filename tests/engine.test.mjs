@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, explainYear, productLineResults, profitAllocation,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, explainYear, productLineResults, PRODUCTS, profitAllocation,
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
@@ -36,7 +36,49 @@ test('the default budget meets its margin target without rescaling unit costs', 
   assert.equal(budget[0].costScale, 1)
   assert.equal(cents(total(budget, 'revenue')), 10_487_570)
   assert.ok(Math.abs(total(budget, 'operatingProfit') / total(budget, 'revenue') - config.annualOperatingMargin) < 1e-9)
+  // The default group earns an operating margin in the high teens, and both entrepreneurs stay profitable.
+  assert.ok(config.annualOperatingMargin > 0.17 && config.annualOperatingMargin < 0.195)
+  for (const id of ['US', 'CH']) assert.ok(budget.reduce((sum, month) => sum + month.entities[id].operatingProfit, 0) > 0, id)
   assert.ok(variance.every(month => Math.abs(month.check) < 0.005))
+})
+
+test('a saved scenario that has not started takes the current default margin, and one in progress keeps its own', () => {
+  const previous = 3_965_513.159268929 / 10_487_570 - 0.04
+  const saved = { ...createConfig(), annualOperatingMargin: previous }
+  assert.equal(upgradeConfig(structuredClone(saved), false).annualOperatingMargin, createConfig().annualOperatingMargin)
+  assert.equal(upgradeConfig(structuredClone(saved), true).annualOperatingMargin, previous)
+  // A target the player chose is left alone.
+  assert.equal(upgradeConfig({ ...structuredClone(saved), annualOperatingMargin: 0.25 }, false).annualOperatingMargin, 0.25)
+})
+
+test('a price change reaches a distributor\'s cost of sales only after its two months of stock are sold', () => {
+  const config = createConfig()
+  const base = runYear(config)
+  for (const [id, route] of [['DE', 'CH-DE'], ['FR', 'CH-FR'], ['UK', 'CH-UK'], ['APAC', 'CH-APAC'], ['CA', 'US-CA']]) {
+    // A distributor starts every month holding about two months of normal demand, bought at earlier prices.
+    for (const family of Object.keys(PRODUCTS)) {
+      const bin = base.actual[3].inventory.find(entry => entry.owner === id && entry.product === family)
+      const opening = bin.opening.reduce((sum, lot) => sum + lot.quantity, 0)
+      assert.ok(Math.abs(opening / PRODUCTS[family].demand[id] - 2) < 0.35, `${id} ${family}`)
+    }
+    const current = reviewGoodsPricing(config, 3).routes.find(entry => entry.key === route).prices
+    const raised = Object.fromEntries(current.map(price => [price.product, cents(price.applied * 1.1)]))
+    const changed = runYear(applyGoodsPrices(config, 3, { [route]: raised }))
+    // A 10% rise in cost of sales means every unit sold carried the new price.
+    const atNewPrice = month => (changed.actual[month].entities[id].cogs / base.actual[month].entities[id].cogs - 1) / 0.1
+    // The new price starts in April. April's sales all come out of older stock.
+    assert.ok(Math.abs(atNewPrice(3)) < 1e-9, id)
+    // In May most units sold are still older stock.
+    assert.ok(atNewPrice(4) < 0.35, id)
+    // By June the older stock is gone, or nearly.
+    assert.ok(atNewPrice(5) > 0.9, id)
+    assert.ok(Math.abs(atNewPrice(6) - 1) < 0.001, id)
+    // Purchases carry the new price from April, so the higher cost sits in inventory first.
+    const bought = (year, month) => year.actual[month].transactions
+      .filter(invoice => invoice.to === id && invoice.category === 'goods' && !invoice.external)
+      .reduce((sum, invoice) => sum + invoice.amount, 0)
+    assert.ok(Math.abs(bought(changed, 3) / bought(base, 3) - 1.1) < 0.001, id)
+  }
 })
 
 test('group-wide shocks for a seed do not depend on the market list', () => {
@@ -57,7 +99,7 @@ test('without market variation every limited-risk distributor posts the same mar
   const { actual, variance } = runYear(legacyConfig())
   assert.equal(cents(actual[0].consolidated.revenue), 805_677.32)
   const margins = ['DE', 'FR', 'UK'].map(id => actual[0].entities[id].operatingMargin.toFixed(4))
-  assert.deepEqual(margins, ['0.1146', '0.1146', '0.1146'])
+  assert.equal(new Set(margins).size, 1)
   assert.ok(variance.every(month => Math.abs(month.check) < 0.005))
 })
 
@@ -75,7 +117,7 @@ test('the product lines keep the same profitability order in every market', () =
     }
   }
   const lines = Object.fromEntries(productLineResults(budget[0]).map(line => [line.product, line.grossMargin]))
-  assert.ok(lines.B > 0.7 && lines.A > 0.5 && lines.A < 0.7 && lines.C < 0.35)
+  assert.ok(lines.B > 0.6 && lines.A > 0.4 && lines.A < 0.6 && lines.C > 0.15 && lines.C < 0.35)
 })
 
 test('with no floor a thin-margin product can be priced below standard cost', () => {
@@ -309,7 +351,7 @@ test('with no fixed overhead Poland\'s budget cost per unit is its standard conv
   delete config.annualOperatingMargin
   const { budget } = runYear(config)
   for (const month of budget) {
-    const standard = Object.entries(month.capacity.PL.byProduct).reduce((sum, [family, units]) => sum + units * { A: 13, B: 11, C: 43 }[family], 0)
+    const standard = Object.entries(month.capacity.PL.byProduct).reduce((sum, [family, units]) => sum + units * PRODUCTS[family].plConversion, 0)
     assert.ok(Math.abs(month.services.PL.cost - standard) < 1e-6)
   }
 })
@@ -340,11 +382,12 @@ test('a service fee set at a quarterly review applies from the next month and it
   assert.equal(reviewGoodsPricing(revised, 9).priceRevisions, 1)
 })
 
-test('the local statutory adjustment is a signed share of operating expenses within its limits', () => {
+test('the GAAP-to-stat adjustment is a signed share of operating expenses within its limits', () => {
   const ids = Array.from({ length: 4000 }, (_, index) => 'entity' + index)
-  const rates = Object.values(simulateStatAdjustments(DEFAULT_SIMULATION, ids))
+  const always = { ...DEFAULT_SIMULATION, statAdjustment: { ...DEFAULT_SIMULATION.statAdjustment, probability: 1 } }
+  const rates = Object.values(simulateStatAdjustments(always, ids))
   const sizes = rates.map(Math.abs)
-  assert.ok(Math.max(...sizes) <= 0.10 && Math.min(...sizes) >= 0)
+  assert.ok(Math.max(...sizes) <= 0.10 && Math.min(...sizes) > 0)
   const average = sizes.reduce((sum, size) => sum + size, 0) / sizes.length
   assert.ok(Math.abs(average - 0.03) < 0.002)
   const raising = rates.filter(rate => rate > 0).length / rates.length
@@ -352,7 +395,27 @@ test('the local statutory adjustment is a signed share of operating expenses wit
   assert.deepEqual(simulateStatAdjustments(DEFAULT_SIMULATION, ['DE', 'FR']), simulateStatAdjustments(DEFAULT_SIMULATION, ['DE', 'FR']))
   const off = simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: { max: 0, mean: 0 } }, ['DE'])
   assert.equal(off.DE, 0)
-  assert.throws(() => simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: { max: 0.05, mean: 0.06 } }, ['DE']), /statutory adjustment/)
+  assert.throws(() => simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: { max: 0.05, mean: 0.06 } }, ['DE']), /GAAP-to-stat adjustment/)
+})
+
+test('an entity has a GAAP-to-stat adjustment only with the set probability', () => {
+  const ids = Array.from({ length: 4000 }, (_, index) => 'entity' + index)
+  const withChance = probability => ({ ...DEFAULT_SIMULATION, statAdjustment: { ...DEFAULT_SIMULATION.statAdjustment, probability } })
+  assert.equal(DEFAULT_SIMULATION.statAdjustment.probability, 0.5)
+  const half = simulateStatAdjustments(DEFAULT_SIMULATION, ids)
+  const always = simulateStatAdjustments(withChance(1), ids)
+  const adjusted = ids.filter(id => half[id] !== 0)
+  assert.ok(adjusted.length / ids.length > 0.47 && adjusted.length / ids.length < 0.53)
+  // The chance decides whether an entity is adjusted. It does not change the size it would have had.
+  for (const id of adjusted) assert.equal(half[id], always[id])
+  const average = adjusted.reduce((sum, id) => sum + Math.abs(half[id]), 0) / adjusted.length
+  assert.ok(Math.abs(average - 0.03) < 0.003)
+  assert.ok(Object.values(simulateStatAdjustments(withChance(0), ids)).every(rate => rate === 0))
+  assert.ok(Object.values(always).every(rate => rate !== 0))
+  // A scenario saved before the chance existed adjusted every entity.
+  const { probability, ...legacy } = DEFAULT_SIMULATION.statAdjustment
+  assert.deepEqual(simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: legacy }, ids), always)
+  assert.throws(() => simulateStatAdjustments(withChance(1.2), ['DE']), /chance of a GAAP-to-stat adjustment/)
 })
 
 test('the range is tested on US GAAP during the year and on local statutory results after December', () => {
@@ -371,7 +434,9 @@ test('the range is tested on US GAAP during the year and on local statutory resu
     const profit = result.revenue - result.rdServiceRevenue - result.cogs - result.otherOperatingExpenses - stat.adjustment
     const base = ['PL', 'IN'].includes(id) ? result.otherOperatingExpenses + stat.adjustment : result.revenue - result.rdServiceRevenue
     assert.ok(Math.abs(policy.forecast - profit / base) < 1e-9, id)
-    assert.notEqual(bp(policy.forecast), bp(policy.gaap), id)
+    // Only an entity that drew an adjustment differs from its US GAAP result.
+    if (stat.rate) assert.notEqual(bp(policy.forecast), bp(policy.gaap), id)
+    else assert.equal(policy.forecast, policy.gaap, id)
   }
   // The adjustment sits outside the US GAAP ledger, so the consolidated result is untouched.
   assert.ok(Math.abs(actual[11].reconciliation.profitDifference) < 0.005)

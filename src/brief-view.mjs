@@ -79,12 +79,12 @@ export function renderBrief({ config, revealed }) {
           <li>Read the budget on the <a href="#dashboard">Dashboard</a> and trace the flows on the <a href="#map">Transaction map</a>.</li>
           <li>Reveal actuals one month at a time. The variance bridge explains each month’s gap to budget.</li>
           <li>After the March, June and September closes, open <a href="#pricing">Transfer prices</a>. The forecast shows where each tested entity will finish the year at current prices and fees. Take the policy price or fee, enter your own, or leave them alone.</li>
-          <li>New prices apply to new shipments only. Stock a distributor already holds keeps its old cost and is sold first, so a price change takes time to reach its margin.</li>
+          <li>New prices apply to new shipments only. Each distributor holds about two months of stock, which keeps its old cost and is sold first, so a price change takes about two months to reach its cost of sales.</li>
           <li>Poland and India are paid a fixed monthly fee, but their costs move. Part of Poland’s cost is fixed overhead. In a slow month its cost falls by less than its output and the fee does not fall at all, so its markup rises. A busy month does the reverse.</li>
           <li>${priceFloor?.enabled
             ? `A price floor is in force. No goods price can go below standard cost plus ${percent.format(priceFloor.markup)}, and a year-end credit cannot undo it.`
             : 'No price floor is set, so a goods price can fall below the supplier’s standard cost. You can set one in Scenario settings.'}</li>
-          <li>The December close brings each entity’s local statutory adjustment: between 0% and ${percent.format(config.simulation?.statAdjustment?.max ?? 0)} of its operating expenses, up or down. A result inside the range on US GAAP can land outside it in the local accounts.</li>
+          <li>At the December close each entity outside the United States has a ${percent.format(config.simulation?.statAdjustment?.probability ?? 1)} chance of an unexpected GAAP-to-stat adjustment: up to ${percent.format(config.simulation?.statAdjustment?.max ?? 0)} of its operating expenses, up or down. A result inside the range on US GAAP can land outside it in the local accounts.</li>
           <li>A pop-up then explains where each tested entity finished and why. Choose a year-end adjustment for each one and read the year-end review.</li>
           <li>To see what happens when nobody acts, use <strong>Run the full year</strong> on the Dashboard. It reveals every month at unchanged prices and fees. You can then replay the same year and manage it.</li>
         </ol>
