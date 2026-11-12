@@ -12,6 +12,7 @@ The simulator uses a synthetic scenario. Tax and duty rates are illustrative. Sc
 - Fixed monthly service fees for the Polish toll manufacturer and the Indian service center, set from budgeted cost plus the policy markup, against costs that vary each month. Part of Poland's cost is fixed overhead, so its unit cost rises when output falls
 - Arm's-length ranges for seven tested entities: the limited-risk and full-fledged distributors on operating margin, Poland and India on markup on cost
 - A US GAAP to local statutory adjustment for each entity outside the United States, drawn once for the year and revealed at the December close. The ranges and local income tax are tested on the statutory results
+- An opening sequence on the first load of each browser session: the bars of the TH monogram tumble into place, the PlayTP name appears, and both shrink into the brand corner. It can be skipped, does not play when reduced motion is requested, and replays with `?intro` in the address
 - An automatic full-year run at unchanged prices and fees, with a pop-up that explains each out-of-range result, and a replay of the same year
 - An optional price floor: no goods price below standard cost plus a markup
 - Quarterly reviews of goods prices and service fees, and year-end adjustments
