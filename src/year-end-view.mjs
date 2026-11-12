@@ -65,7 +65,7 @@ function scorecard({ yearEnd, entityResults, fullYear, budget, priceRevisions })
   const exposure = yearEnd.reduce((total, entry) => total + (policies.get(entry.id)?.exposure ?? 0), 0);
   const adjusted = yearEnd.filter(entry => entry.amount);
   const moved = adjusted.reduce((total, entry) => total + Math.abs(entry.amount), 0);
-  const adjustmentDuty = Object.values(fullYear.customs.routes).reduce((total, route) => total + route.rate * route.adjustment, 0);
+  const { adjustmentDuty } = fullYear.customs;
   const consolidated = entityResults.find(row => row.id === 'consolidated').fullYear;
   const profitGap = consolidated.operatingProfit - budget.operatingProfit;
   return `<section aria-labelledby="year-end-review-heading" class="year-end-review">

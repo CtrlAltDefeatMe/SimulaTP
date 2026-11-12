@@ -53,6 +53,14 @@ label.field.field-flag, .field-flag input { color: var(--negative); }
 .panel-note { padding: 0 20px 12px; }
 .rate-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 11px; }
 
+/* Customs duty by importing block, origin and product line */
+.customs-table { min-width: 860px; }
+.duty-table { min-width: 720px; }
+.customs-table tbody tr:not(.total-row) th, .duty-table tbody th { background: var(--surface); }
+.customs-table .table-text, .duty-table .table-text { text-align: left; color: var(--secondary); }
+.duty-table td input { width: 100%; min-width: 84px; max-width: 150px; }
+.duty-table tbody td, .duty-table tbody th { vertical-align: middle; }
+
 /* Service fees and local statutory results */
 .service-table { min-width: 760px; }
 .stat-table { min-width: 940px; }

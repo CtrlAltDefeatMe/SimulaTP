@@ -17,7 +17,7 @@ The simulator uses a synthetic scenario. Tax and duty rates are illustrative. Sc
 - An optional price floor: no goods price below standard cost plus a markup
 - Quarterly reviews of goods prices and service fees, and year-end adjustments. Each distributor holds about two months of stock on a FIFO basis, so a price change reaches its cost of sales about two months later
 - A default group that earns a consolidated operating margin in the high teens (18.7%), with a high-margin, a mid-margin and a thin-margin product line in every market
-- Income tax by entity, and customs duty on declared transfer prices as a memo
+- Income tax by entity, and customs duty on declared transfer prices as a memo. Duty rates are set by importing block (Europe including Switzerland and the United Kingdom, the United States, Canada, Asia), by where the goods were made (United States or Poland) and by product line
 
 Customs duty is not deducted from operating profit, and all amounts are in US dollars. There is no currency layer.
 

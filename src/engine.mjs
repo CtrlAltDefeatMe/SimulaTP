@@ -93,9 +93,25 @@ const POLICY_KINDS = {
 const policyKind = id => id === 'PL' ? 'toll' : id === 'IN' ? 'services' : LRD.has(id) ? 'lrd' : 'ffd'
 // Illustrative statutory income tax rates. They are scenario assumptions, not tax advice.
 const DEFAULT_TAX_RATES = { US: 0.25, CH: 0.15, PL: 0.19, BE: 0.25, DE: 0.30, FR: 0.25, UK: 0.25, APAC: 0.17, CA: 0.265, IN: 0.25 }
-// Illustrative import duty on the declared transfer price, keyed by goods route.
-// Shipments from the Belgian warehouse to Germany and France stay inside the EU.
-const DEFAULT_DUTY_RATES = { 'US-CH': 0.03, 'CH-US': 0.10, 'CH-UK': 0, 'CH-APAC': 0.05, 'US-CA': 0 }
+// Customs territories. The EU, Switzerland and the United Kingdom are treated as one block.
+export const CUSTOMS_BLOCKS = {
+  EU: { name: 'Europe', members: 'EU, Switzerland and United Kingdom' },
+  US: { name: 'United States' },
+  CA: { name: 'Canada' },
+  APAC: { name: 'Asia' },
+}
+const customsBlock = id => id !== 'EU' && id in CUSTOMS_BLOCKS ? id : 'EU'
+// Goods are made in the United States or, for the Swiss principal, in Poland.
+export const GOODS_ORIGINS = { US: 'United States', EU: 'Europe (Poland)' }
+// A lane is one importing block and one place the goods were made. Goods that move inside
+// a block, or return to the block that made them, pay no duty and have no lane.
+export const CUSTOMS_LANES = [['EU', 'US'], ['US', 'EU'], ['CA', 'US'], ['CA', 'EU'], ['APAC', 'US'], ['APAC', 'EU']]
+  .map(([importer, origin]) => ({ key: importer + '.' + origin, importer, origin }))
+// Illustrative import duty on the declared transfer price. Each lane starts with one rate for all product lines.
+const DEFAULT_DUTY_RATES = { 'EU.US': 0.03, 'US.EU': 0.10, 'CA.US': 0, 'CA.EU': 0.04, 'APAC.US': 0.05, 'APAC.EU': 0.05 }
+// Rates used to be set by goods route, for every product and origin entering the destination.
+const LEGACY_DUTY_ROUTES = { 'EU.US': 'US-CH', 'US.EU': 'CH-US', 'CA.US': 'US-CA', 'CA.EU': 'US-CA', 'APAC.US': 'CH-APAC', 'APAC.EU': 'CH-APAC' }
+const LEGACY_DUTY_DEFAULTS = { 'US-CH': 0.03, 'CH-US': 0.10, 'CH-UK': 0, 'CH-APAC': 0.05, 'US-CA': 0 }
 export const YEAR_END_MODES = ['none', 'range', 'target']
 export const MAX_ROYALTY_RATE = 0.5
 const HISTORICAL_OPENING_POLICIES = { lrdMargin: 0.03, ffdMargin: 0.075, polandMarkup: 0.08 }
@@ -107,8 +123,6 @@ const GOODS_ROUTES = [
   ...DISTRIBUTORS.map(to => ({ from: sourceOf(to), to, policy: LRD.has(to) ? 'LRD_GOODS' : 'FFD_GOODS' })),
 ].map(route => ({ ...route, key: goodsRouteKey(route.from, route.to) }))
 const GOODS_ROUTE_KEYS = new Set(GOODS_ROUTES.map(route => route.key))
-export const CUSTOMS_ROUTES = GOODS_ROUTES.filter(route => route.key in DEFAULT_DUTY_RATES)
-  .map(({ key, from, to }) => ({ key, from, to }))
 export const TAXED_ENTITIES = ALL_COMPANIES
 const sum = values => values.reduce((total, value) => total + value, 0)
 const valueOf = (lots, field) => sum(lots.map(lot => lot.quantity * lot[field]))
@@ -122,7 +136,10 @@ const basisPoints = value => Math.round(value * 10_000)
 // A market's shock is the group-wide shock plus that market's own deviation.
 const marketShock = (shocks, id, key) => shocks[key] + (shocks.markets?.[id]?.[key] ?? 0)
 const taxRate = (config, id) => config.tax?.rates?.[id] ?? DEFAULT_TAX_RATES[id] ?? 0
-const dutyRate = (config, key) => config.customs?.rates?.[key] ?? DEFAULT_DUTY_RATES[key] ?? 0
+const dutyRate = (config, lane, family) => config.customs?.rates?.[lane]?.[family] ?? DEFAULT_DUTY_RATES[lane] ?? 0
+const dutyRates = pick => Object.fromEntries(CUSTOMS_LANES.map(({ key }) => [
+  key, Object.fromEntries(FAMILIES.map(family => [family, pick(key, family)])),
+]))
 
 export function createConfig() {
   return {
@@ -138,7 +155,7 @@ export function createConfig() {
     annualOperatingMargin: DEFAULT_ANNUAL_MARGIN,
     rd: { salesRate: DEFAULT_RD_RATE, usShare: 0.5 },
     tax: { rates: { ...DEFAULT_TAX_RATES } },
-    customs: { rates: { ...DEFAULT_DUTY_RATES } },
+    customs: { rates: dutyRates(key => DEFAULT_DUTY_RATES[key]) },
     // Optional rule: no goods transfer price may fall below standard cost plus this markup.
     priceFloor: { enabled: false, markup: 0.05 },
     startingPriceMethod: 'fifo-policy',
@@ -168,6 +185,13 @@ export function upgradeConfig(config, started) {
     if (Number.isFinite(target) && (target < low || target > high)) {
       upgraded.ranges = { ...upgraded.ranges, [kind]: { low: Math.min(low, target), high: Math.max(high, target) } }
     }
+  }
+  // Duty rates saved by goods route become rates by importing block, origin and product line.
+  const savedDuty = upgraded.customs?.rates
+  if (savedDuty && !CUSTOMS_LANES.some(({ key }) => key in savedDuty)) {
+    const untouched = Object.entries(LEGACY_DUTY_DEFAULTS).every(([route, rate]) => savedDuty[route] === rate)
+    upgraded.customs = !started && untouched ? defaults.customs
+      : { rates: dutyRates(key => savedDuty[LEGACY_DUTY_ROUTES[key]] ?? DEFAULT_DUTY_RATES[key]) }
   }
   // A scenario that has not started and still holds an earlier default takes the current one.
   if (!started && upgraded.rd.salesRate === DEFAULT_RD_RATE
@@ -272,15 +296,16 @@ function validateConfig(config) {
   if (fixedShare !== undefined && (!Number.isFinite(fixedShare) || fixedShare < 0 || fixedShare > 1)) {
     throw new RangeError('The fixed share of Poland\'s conversion cost must be between 0% and 100%.')
   }
-  for (const [rates, keys, label] of [
-    [config.tax?.rates, TAXED_ENTITIES, 'income tax rate'], [config.customs?.rates, CUSTOMS_ROUTES.map(route => route.key), 'customs duty rate'],
-  ]) {
-    if (rates === undefined) continue
-    for (const key of keys) {
-      if (!Number.isFinite(rates[key]) || rates[key] < 0 || rates[key] >= 1) {
-        throw new RangeError(`Each ${label} must be between 0% and less than 100%.`)
-      }
-    }
+  const taxRates = config.tax?.rates
+  if (taxRates !== undefined && TAXED_ENTITIES.some(id => !Number.isFinite(taxRates[id]) || taxRates[id] < 0 || taxRates[id] >= 1)) {
+    throw new RangeError('Each income tax rate must be between 0% and less than 100%.')
+  }
+  const duties = config.customs?.rates
+  if (duties !== undefined && CUSTOMS_LANES.some(({ key }) => FAMILIES.some((family) => {
+    const rate = duties[key]?.[family]
+    return !Number.isFinite(rate) || rate < 0 || rate >= 1
+  }))) {
+    throw new RangeError('Each customs duty rate must be between 0% and less than 100%.')
   }
   for (const [id, mode] of Object.entries(config.yearEnd ?? {})) {
     if (!TESTED_PARTIES.includes(id) || !YEAR_END_MODES.includes(mode)) throw new RangeError('Unknown year-end adjustment choice.')
@@ -318,8 +343,9 @@ function serviceFeesForMonth(config, month, initial) {
   return revision ? { ...initial, ...revision.fees } : initial
 }
 
-function makeLot(quantity, unitValue, unitGroupCost, unitMaterialCost, vintage) {
-  return { quantity, unitValue, unitGroupCost, unitMaterialCost, vintage }
+// `origin` is the customs block where the goods were made. It travels with the lot.
+function makeLot(quantity, unitValue, unitGroupCost, unitMaterialCost, vintage, origin) {
+  return { quantity, unitValue, unitGroupCost, unitMaterialCost, vintage, origin }
 }
 
 class Stock {
@@ -439,9 +465,10 @@ function seedOpeningStock(costScale) {
       const cost = baseGroupCost(product, sourceOf(market)) * costScale
       const tp = distributorUnitTp(product, market, historical)
       const bin = stock.bin(market, market, family)
+      const origin = customsBlock(sourceOf(market))
       bin.lots = [
-        makeLot(product.demand[market], tp * 0.97, cost * 0.98, product.material * costScale * 0.98, '2026-11'),
-        makeLot(product.demand[market], tp, cost, product.material * costScale, '2026-12'),
+        makeLot(product.demand[market], tp * 0.97, cost * 0.98, product.material * costScale * 0.98, '2026-11', origin),
+        makeLot(product.demand[market], tp, cost, product.material * costScale, '2026-12', origin),
       ]
     }
     const swissDemand = sum(MARKETS.filter(id => id !== 'US' && id !== 'CA').map(id => product.demand[id]))
@@ -449,14 +476,14 @@ function seedOpeningStock(costScale) {
     const local = cost + product.plConversion * costScale * historical.polandMarkup
     const warehouse = stock.bin('CH', 'BE', family)
     warehouse.lots = [0.96, 0.98, 0.99, 1].map((factor, index) =>
-      makeLot(swissDemand, local * factor, cost * factor, product.material * costScale * factor, '2026-' + String(9 + index).padStart(2, '0')))
+      makeLot(swissDemand, local * factor, cost * factor, product.material * costScale * factor, '2026-' + String(9 + index).padStart(2, '0'), 'EU'))
     const us = stock.bin('US', 'US', family)
     const usCost = baseGroupCost(product, 'US') * costScale
-    us.lots = [makeLot(product.demand.US + product.demand.CA, usCost, usCost, product.material * costScale, '2026-12')]
+    us.lots = [makeLot(product.demand.US + product.demand.CA, usCost, usCost, product.material * costScale, '2026-12', 'US')]
     for (const [stage, months] of [['raw', 0.35], ['wip', 0.15]]) {
       const bin = stock.bin('CH', 'PL', family, stage)
       const material = product.material * costScale
-      bin.lots = [makeLot(Math.round(swissDemand * months), material, material, material, '2026-12')]
+      bin.lots = [makeLot(Math.round(swissDemand * months), material, material, material, '2026-12', 'EU')]
     }
   }
   return stock
@@ -480,9 +507,9 @@ class Ledger {
     )
   }
 
-  transfer({ from, to, category, policy, product = null, quantity = 0, amount, buyerAccount, basis = null, external = false }) {
+  transfer({ from, to, category, policy, product = null, quantity = 0, amount, buyerAccount, basis = null, external = false, origins = null }) {
     const id = `T${this.month}-${++this.sequence}`
-    this.transactions.push({ id, from, to, category, policy, product, quantity, amount, basis, external })
+    this.transactions.push({ id, from, to, category, policy, product, quantity, amount, basis, external, ...(origins ? { origins } : {}) })
     const revenueAccount = policy === 'RD_SERVICES' ? 'intercompanyRDRevenue' : {
       goods: 'intercompanyGoodsRevenue', services: 'intercompanyServicesRevenue', royalty: 'intercompanyRoyaltyRevenue',
     }[category]
@@ -567,7 +594,7 @@ function produceInUs(stock, book, family, plan, usUnits, shocks, vintage, costSc
   const product = PRODUCTS[family]
   const material = product.material * costScale * (1 + shocks.materialCost)
   const cost = material + product.usConversion * costScale
-  stock.receive(plan.us, [makeLot(usUnits, cost, cost, material, vintage)])
+  stock.receive(plan.us, [makeLot(usUnits, cost, cost, material, vintage, 'US')])
   book.post('US', 'inventory', 'externalClearing', usUnits * cost)
 }
 
@@ -607,7 +634,7 @@ function tollInPoland(stock, book, plans, plUnits, shocks, config, vintage, cost
     const raw = stock.bin('CH', 'PL', family, 'raw')
     const wip = stock.bin('CH', 'PL', family, 'wip')
     // Replenish the raw and material-only WIP buffers as conversion completes.
-    stock.receive(raw, [makeLot(units, material, material, material, vintage)])
+    stock.receive(raw, [makeLot(units, material, material, material, vintage, 'EU')])
     book.post('CH', 'inventory', 'externalClearing', units * material)
     stock.receive(wip, stock.issue(raw, units))
     const completed = stock.issue(wip, units)
@@ -618,7 +645,7 @@ function tollInPoland(stock, book, plans, plUnits, shocks, config, vintage, cost
       quantity: units, amount: charge * share, basis: cost * share, buyerAccount: 'inventory',
     })
     stock.receive(plan.warehouse, completed.map(lot => makeLot(
-      lot.quantity, lot.unitValue + charge * share / units, lot.unitGroupCost + cost * share / units, lot.unitMaterialCost, vintage,
+      lot.quantity, lot.unitValue + charge * share / units, lot.unitGroupCost + cost * share / units, lot.unitMaterialCost, vintage, lot.origin,
     )))
   })
   return result
@@ -627,11 +654,14 @@ function tollInPoland(stock, book, plans, plUnits, shocks, config, vintage, cost
 function deliver(stock, book, { lots, from, to, target, family, policy, priceLot, vintage }) {
   const quantity = unitsOf(lots)
   if (!quantity) return
-  const received = lots.map(lot => makeLot(lot.quantity, priceLot(lot), lot.unitGroupCost, lot.unitMaterialCost, vintage))
+  const received = lots.map(lot => makeLot(lot.quantity, priceLot(lot), lot.unitGroupCost, lot.unitMaterialCost, vintage, lot.origin))
   stock.receive(target, received)
+  // The invoice value by where the goods were made. Customs duty depends on it.
+  const origins = {}
+  for (const lot of received) origins[lot.origin] = (origins[lot.origin] ?? 0) + lot.quantity * lot.unitValue
   book.transfer({
     from, to, category: 'goods', policy, product: family, quantity,
-    amount: valueOf(received, 'unitValue'), basis: valueOf(lots, 'unitValue'), buyerAccount: 'inventory',
+    amount: valueOf(received, 'unitValue'), basis: valueOf(lots, 'unitValue'), buyerAccount: 'inventory', origins,
   })
   book.post(from, 'cogs', 'inventory', valueOf(lots, 'unitValue'))
 }
@@ -846,19 +876,46 @@ function taxFor(config, entities, stat = null) {
   return { entities: byEntity, total, profit, effectiveRate: profit ? total / profit : 0 }
 }
 
-// Duty is charged on the declared transfer price of goods that cross a customs border.
-// It is reported beside the results and is not charged to operating profit.
-function customsFor(config, transactions) {
-  const routes = Object.fromEntries(CUSTOMS_ROUTES.map(({ key, from, to }) => {
-    const rate = dutyRate(config, key)
-    const invoices = transactions.filter(transaction =>
-      !transaction.external && transaction.category === 'goods' && transaction.from === from && transaction.to === to)
-    const value = sum(invoices.filter(invoice => invoice.policy !== 'YEAR_END_ADJUSTMENT').map(invoice => invoice.amount))
-    // An upward year-end adjustment raises the declared value. No refund is assumed for a credit.
-    const adjustment = Math.max(0, sum(invoices.filter(invoice => invoice.policy === 'YEAR_END_ADJUSTMENT').map(invoice => invoice.amount)))
-    return [key, { from, to, rate, value, adjustment, duty: rate * (value + adjustment) }]
+const emptyLanes = config => Object.fromEntries(CUSTOMS_LANES.map(({ key, importer, origin }) => [key, {
+  importer, origin, value: 0, duty: 0,
+  products: Object.fromEntries(FAMILIES.map(family => [family, { rate: dutyRate(config, key, family), value: 0, duty: 0 }])),
+}]))
+
+// Duty is charged on the declared transfer price each time goods enter a customs block
+// from another one. The rate depends on the importing block, the product line and where
+// the goods were made. It is reported beside the results and is not charged to operating profit.
+function customsFor(config, transactions, priorMonths = []) {
+  const lanes = emptyLanes(config)
+  const credits = {}
+  for (const invoice of transactions) {
+    if (invoice.external || invoice.category !== 'goods') continue
+    const importer = customsBlock(invoice.to)
+    if (importer === customsBlock(invoice.from)) continue
+    if (invoice.policy === 'YEAR_END_ADJUSTMENT') {
+      credits[importer] = (credits[importer] ?? 0) + invoice.amount
+      continue
+    }
+    for (const [origin, value] of Object.entries(invoice.origins ?? {})) {
+      const lane = lanes[importer + '.' + origin]
+      if (!lane) continue
+      const entry = lane.products[invoice.product]
+      entry.value += value
+      entry.duty += entry.rate * value
+      lane.value += value
+      lane.duty += entry.rate * value
+    }
+  }
+  // A year-end adjustment changes what was paid for the whole year's imports, so it takes
+  // their average duty rate. An upward one adds duty. No refund is assumed for a credit.
+  const adjustments = Object.fromEntries(Object.entries(credits).map(([importer, amount]) => {
+    const imports = [...priorMonths.map(month => month.customs.lanes), lanes]
+      .flatMap(set => Object.values(set).filter(lane => lane.importer === importer))
+    const value = sum(imports.map(lane => lane.value))
+    const rate = value ? sum(imports.map(lane => lane.duty)) / value : 0
+    return [importer, { amount, rate, duty: rate * Math.max(0, amount) }]
   }))
-  return { routes, total: sum(Object.values(routes).map(route => route.duty)) }
+  const adjustmentDuty = sum(Object.values(adjustments).map(entry => entry.duty))
+  return { lanes, adjustments, adjustmentDuty, total: sum(Object.values(lanes).map(lane => lane.duty)) + adjustmentDuty }
 }
 
 /** Third-party sales and group cost of sales by product line for a closed month. */
@@ -874,16 +931,26 @@ export function productLineResults(month) {
 /** Total income tax and customs duty for a set of closed months. */
 export function summarizeTaxAndCustoms(config, months) {
   const entities = Object.fromEntries(TAXED_ENTITIES.map(id => [id, rollupPnl(months.map(month => month.entities[id]))]))
-  const routes = Object.fromEntries(CUSTOMS_ROUTES.map(({ key, from, to }) => {
-    const entries = months.map(month => month.customs.routes[key])
-    return [key, {
-      from, to, rate: dutyRate(config, key), value: sum(entries.map(entry => entry.value)),
-      adjustment: sum(entries.map(entry => entry.adjustment)), duty: sum(entries.map(entry => entry.duty)),
-    }]
-  }))
+  const lanes = emptyLanes(config)
+  for (const month of months) {
+    for (const [key, lane] of Object.entries(month.customs.lanes)) {
+      lanes[key].value += lane.value
+      lanes[key].duty += lane.duty
+      for (const family of FAMILIES) {
+        lanes[key].products[family].value += lane.products[family].value
+        lanes[key].products[family].duty += lane.products[family].duty
+      }
+    }
+  }
+  // Year-end adjustments exist only in the December close.
+  const adjustments = Object.assign({}, ...months.map(month => month.customs.adjustments))
+  const adjustmentDuty = sum(months.map(month => month.customs.adjustmentDuty))
   // A full year of actuals carries the statutory results. Tax then follows them.
   const stat = months.length === 12 ? months[11].stat ?? null : null
-  return { tax: taxFor(config, entities, stat), customs: { routes, total: sum(Object.values(routes).map(route => route.duty)) } }
+  return {
+    tax: taxFor(config, entities, stat),
+    customs: { lanes, adjustments, adjustmentDuty, total: sum(months.map(month => month.customs.total)) },
+  }
 }
 
 function balances(book, stock, sales, entities, accounts) {
@@ -965,7 +1032,7 @@ function closeMonth(stock, config, month, shocks, priceTable, costScale, fees = 
   }
   return {
     month, shocks, entities, sales, capacity, royaltyBase, costScale, ...financials, services: { PL: poland, IN: india },
-    tax: taxFor(config, entities), customs: customsFor(config, book.transactions), ...(yearEnd ? { yearEnd, stat } : {}),
+    tax: taxFor(config, entities), customs: customsFor(config, book.transactions, yearToDate?.months ?? []), ...(yearEnd ? { yearEnd, stat } : {}),
     transactions: book.transactions, journal: book.journal,
   }
 }

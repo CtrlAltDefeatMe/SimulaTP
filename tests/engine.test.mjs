@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, explainYear, productLineResults, PRODUCTS, profitAllocation,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, explainYear, productLineResults, PRODUCTS, profitAllocation,
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
@@ -40,6 +40,80 @@ test('the default budget meets its margin target without rescaling unit costs', 
   assert.ok(config.annualOperatingMargin > 0.17 && config.annualOperatingMargin < 0.195)
   for (const id of ['US', 'CH']) assert.ok(budget.reduce((sum, month) => sum + month.entities[id].operatingProfit, 0) > 0, id)
   assert.ok(variance.every(month => Math.abs(month.check) < 0.005))
+})
+
+test('customs duty follows the importing block, where the goods were made and the product line', () => {
+  const config = createConfig()
+  // Give every lane and product its own rate so that a mix-up would show.
+  CUSTOMS_LANES.forEach(({ key }, lane) => Object.keys(PRODUCTS).forEach((family, index) => {
+    config.customs.rates[key][family] = 0.01 * (lane + 1) + 0.001 * (index + 1)
+  }))
+  const { actual } = runYear(config)
+  const block = id => ['US', 'CA', 'APAC'].includes(id) ? id : 'EU'
+  const expected = {}
+  for (const month of actual) {
+    for (const invoice of month.transactions) {
+      if (invoice.external || invoice.category !== 'goods' || !invoice.quantity) continue
+      // Every goods invoice says where its units were made, and the parts add up to the invoice.
+      const parts = Object.entries(invoice.origins)
+      assert.ok(parts.every(([origin]) => origin === 'US' || origin === 'EU'))
+      assert.ok(Math.abs(parts.reduce((sum, [, value]) => sum + value, 0) - invoice.amount) < 1e-6)
+      for (const [origin, value] of parts) {
+        const importer = block(invoice.to)
+        // No duty inside a block, and none on goods returning to the block that made them.
+        if (importer === block(invoice.from) || importer === origin) continue
+        const key = importer + '.' + origin
+        expected[key] ??= { A: 0, B: 0, C: 0 }
+        expected[key][invoice.product] += config.customs.rates[key][invoice.product] * value
+      }
+    }
+  }
+  const { lanes, total } = summarizeTaxAndCustoms(config, actual).customs
+  for (const { key } of CUSTOMS_LANES) {
+    for (const family of Object.keys(PRODUCTS)) {
+      assert.ok(Math.abs(lanes[key].products[family].duty - (expected[key]?.[family] ?? 0)) < 0.005, key + ' ' + family)
+      assert.equal(lanes[key].products[family].rate, config.customs.rates[key][family])
+    }
+  }
+  assert.ok(Math.abs(total - Object.values(lanes).reduce((sum, lane) => sum + lane.duty, 0)) < 0.005)
+  // Cross-supply carries US-made goods through the Swiss warehouse to Asia. Canada is supplied
+  // from the US plant, so its lane for Europe-made goods is used only if cross-supplied goods are passed on.
+  for (const key of ['EU.US', 'US.EU', 'CA.US', 'APAC.US', 'APAC.EU']) assert.ok(lanes[key].value > 0, key)
+  // Shipments to Germany, France and the United Kingdom stay inside the European block.
+  assert.ok(Object.values(lanes).every(lane => lane.importer !== 'EU' || lane.origin === 'US'))
+  assert.ok(actual.every(month => month.inventory.every(bin => bin.closing.every(lot => lot.origin === 'US' || lot.origin === 'EU'))))
+})
+
+test('one duty rate moves only its own lane and product line', () => {
+  const config = createConfig()
+  const base = summarizeTaxAndCustoms(config, runYear(config).actual).customs
+  const raised = structuredClone(config)
+  raised.customs.rates['APAC.US'].B += 0.07
+  const after = summarizeTaxAndCustoms(raised, runYear(raised).actual).customs
+  for (const { key } of CUSTOMS_LANES) {
+    for (const family of Object.keys(PRODUCTS)) {
+      const change = after.lanes[key].products[family].duty - base.lanes[key].products[family].duty
+      if (key === 'APAC.US' && family === 'B') assert.ok(Math.abs(change - 0.07 * base.lanes[key].products[family].value) < 0.005)
+      else assert.equal(change, 0, key + ' ' + family)
+    }
+  }
+  // Duty is a memo. It does not change operating profit.
+  assert.equal(total(runYear(raised).actual, 'operatingProfit'), total(runYear(config).actual, 'operatingProfit'))
+  const invalid = structuredClone(config)
+  invalid.customs.rates['CA.EU'].C = 1.2
+  assert.throws(() => runYear(invalid), /customs duty rate/)
+})
+
+test('duty rates saved by goods route become rates by block, origin and product line', () => {
+  const byRoute = { 'US-CH': 0.02, 'CH-US': 0.08, 'CH-UK': 0.01, 'CH-APAC': 0.06, 'US-CA': 0.015 }
+  const inProgress = upgradeConfig({ ...createConfig(), customs: { rates: { ...byRoute } } }, true)
+  const expected = { 'EU.US': 0.02, 'US.EU': 0.08, 'CA.US': 0.015, 'CA.EU': 0.015, 'APAC.US': 0.06, 'APAC.EU': 0.06 }
+  for (const { key } of CUSTOMS_LANES) assert.deepEqual(inProgress.customs.rates[key], { A: expected[key], B: expected[key], C: expected[key] })
+  runYear(inProgress)
+  // A scenario that has not started and never changed the old defaults takes the new ones.
+  const untouched = { 'US-CH': 0.03, 'CH-US': 0.10, 'CH-UK': 0, 'CH-APAC': 0.05, 'US-CA': 0 }
+  assert.deepEqual(upgradeConfig({ ...createConfig(), customs: { rates: untouched } }, false).customs, createConfig().customs)
+  assert.equal(upgradeConfig({ ...createConfig(), customs: { rates: untouched } }, true).customs.rates['CA.EU'].A, 0)
 })
 
 test('a saved scenario that has not started takes the current default margin, and one in progress keeps its own', () => {
@@ -227,14 +301,21 @@ test('year-end adjustments to target move each distributor onto its target and l
   const entries = after.actual[11].transactions.filter(transaction => transaction.policy === 'YEAR_END_ADJUSTMENT')
   assert.equal(entries.length, 5)
   assert.ok(entries.every(entry => entry.quantity === 0))
-  // An upward adjustment on a dutiable route adds duty. A credit earns no refund.
-  const duty = months => summarizeTaxAndCustoms(adjusted, months).customs.routes
-  for (const entry of entries) {
-    const key = entry.from + '-' + entry.to
-    if (!(key in adjusted.customs.rates)) continue // Shipments to Germany and France stay inside the EU.
-    const added = duty(after.actual)[key].duty - duty(before.actual)[key].duty
-    assert.ok(Math.abs(added - adjusted.customs.rates[key] * Math.max(0, entry.amount)) < 0.005, key)
+  // An upward adjustment for a distributor outside Europe adds duty at the average rate
+  // of its year's imports. A credit earns no refund. Germany, France and the United Kingdom
+  // sit inside the same customs block as their supplier.
+  const customs = months => summarizeTaxAndCustoms(adjusted, months).customs
+  assert.deepEqual(Object.keys(customs(after.actual).adjustments).sort(), ['APAC', 'CA'])
+  assert.equal(customs(before.actual).adjustmentDuty, 0)
+  for (const [importer, entry] of Object.entries(customs(after.actual).adjustments)) {
+    const invoice = entries.find(candidate => candidate.to === importer)
+    assert.equal(entry.amount, invoice.amount, importer)
+    const imports = Object.values(customs(after.actual).lanes).filter(lane => lane.importer === importer)
+    const value = imports.reduce((sum, lane) => sum + lane.value, 0)
+    const average = imports.reduce((sum, lane) => sum + lane.duty, 0) / value
+    assert.ok(Math.abs(entry.duty - average * Math.max(0, invoice.amount)) < 0.005, importer)
   }
+  assert.ok(Math.abs(customs(after.actual).total - customs(before.actual).total - customs(after.actual).adjustmentDuty) < 0.005)
   assert.ok(entries.some(entry => entry.amount < 0))
 })
 
