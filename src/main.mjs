@@ -1,7 +1,7 @@
 import {
   applyGoodsPrices, applyYearEndAdjustments, createConfig, CUSTOMS_ROUTES, ENTITIES, MAX_ROYALTY_RATE, POLICY_LABELS, PRODUCTS,
-  profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TAXED_ENTITIES,
-  upgradeConfig,
+  productLineResults, profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms,
+  TAXED_ENTITIES, upgradeConfig,
 } from './engine.mjs';
 import { renderBrief } from './brief-view.mjs';
 import { landPolygons } from './land.mjs';
@@ -293,6 +293,25 @@ function entityPanel(budget, actual) {
   </section>`;
 }
 
+function productLinePanel(budget, actual) {
+  const lines = productLineResults(actual ?? budget);
+  const total = lines.reduce((sum, line) => ({
+    units: sum.units + line.units, revenue: sum.revenue + line.revenue, cogs: sum.cogs + line.cogs,
+  }), { units: 0, revenue: 0, cogs: 0 });
+  const row = (name, line, className = '') => `<tr class="${className}">
+    <td class="table-name">${html(name)}</td><td>${amount(line.units, formatNumber)}</td><td>${amount(line.revenue)}</td>
+    <td>${amount(line.cogs)}</td><td>${amount(line.revenue - line.cogs)}</td>
+    <td>${amount(line.revenue ? (line.revenue - line.cogs) / line.revenue : 0, formatPercent)}</td>
+  </tr>`;
+  return `<section class="panel" aria-labelledby="product-heading">
+    <div class="panel-header"><div><h2 id="product-heading">Product lines</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · third-party sales at group cost · USD</p></div></div>
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="product-heading"><table>
+      <thead><tr><th scope="col">Product family</th><th scope="col">Units sold</th><th scope="col">Net sales</th><th scope="col">Cost of goods sold</th><th scope="col">Gross profit</th><th scope="col">Gross margin</th></tr></thead>
+      <tbody>${lines.map((line) => row(productFor(line.product), line)).join('')}${row('All product lines', total, 'total-row')}</tbody>
+    </table></div>
+  </section>`;
+}
+
 function customsRouteLabel({ from, to }) {
   // Swiss-owned goods ship from and to the Belgian warehouse.
   return `${mapLabel(from === 'CH' ? 'BE' : from)} → ${mapLabel(to === 'CH' ? 'BE' : to)}`;
@@ -363,6 +382,7 @@ function renderDashboard() {
     ${kpis(budget.consolidated, actual?.consolidated)}
     ${chart()}
     ${entityPanel(budget, actual)}
+    ${productLinePanel(budget, actual)}
     ${taxPanel(budget, actual)}
     <div class="dashboard-detail">${variancePanel(bridge)}${controlPanels(budget, actual)}</div>
     ${annualTable()}
@@ -683,7 +703,7 @@ function renderSettings() {
   const defaults = createConfig();
   const {
     simulation, capacity, policies, annualOperatingMargin, rd = defaults.rd, ranges = defaults.ranges,
-    tax = defaults.tax, customs = defaults.customs,
+    tax = defaults.tax, customs = defaults.customs, priceFloor = defaults.priceFloor,
   } = state.config;
   const marketVariation = simulation.marketVariation ?? { demand: 0, salesPrice: 0 };
   const royalty = royaltyCheck(state.config);
@@ -754,6 +774,14 @@ function renderSettings() {
               <p id="royalty-loss-warning" class="field-warning" role="status" data-before-royalty="${licensee.swissBeforeRoyalty}" data-royalty-base="${licensee.royaltyBase}" ${licensee.licenseeLoss ? '' : 'hidden'}>${licensee.licenseeLoss ? html(licenseeLossWarning({ ...licensee, royaltyRate: royalty.royaltyRate })) : ''}</p>
             </div>
           </section>
+          <section class="panel" aria-labelledby="floor-heading">
+            <div class="panel-header"><div><h2 id="floor-heading">Goods price floor</h2><p class="subtitle">A lower limit on every goods transfer price</p></div></div>
+            <div class="form-fields">
+              <label class="check-field"><input type="checkbox" name="priceFloor.enabled" ${priceFloor.enabled ? 'checked' : ''}> Never price goods below standard cost plus a markup</label>
+              <label class="field">Floor markup on standard cost (%)${numberInput('priceFloor.markup', percentInput(priceFloor.markup), { min: 0, max: 100 })}</label>
+              <p class="field-note">Standard cost is budget materials and conversion, plus the Polish toll fee on goods the Swiss principal sells. While the rule is on, starting prices, policy prices, prices you enter and year-end credits cannot take a price below the floor.</p>
+            </div>
+          </section>
           <section class="panel" aria-labelledby="ranges-heading">
             <div class="panel-header"><div><h2 id="ranges-heading">Arm’s-length ranges</h2><p class="subtitle">Full-year operating margins, as percentages</p></div></div>
             <div class="form-fields">
@@ -805,6 +833,7 @@ function readSettings(form) {
   for (const key of MARKET_SHOCK_KEYS) config.simulation.marketVariation[key] = Number(data.get(`marketVariation.${key}`)) / 100;
   for (const id of TAXED_ENTITIES) config.tax.rates[id] = Number(data.get(`tax.${id}`)) / 100;
   for (const { key } of CUSTOMS_ROUTES) config.customs.rates[key] = Number(data.get(`duty.${key}`)) / 100;
+  config.priceFloor = { enabled: data.get('priceFloor.enabled') === 'on', markup: Number(data.get('priceFloor.markup')) / 100 };
   for (const key of SHOCK_KEYS) {
     for (const [bound] of distributionColumns) {
       config.simulation.distributions[key][bound] = Number(data.get(`shock.${key}.${bound}`)) / 100;

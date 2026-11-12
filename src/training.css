@@ -39,6 +39,12 @@ label.field.field-flag, .field-flag input { color: var(--negative); }
 .field-warning { color: var(--negative); font-size: 12px; font-weight: 600; line-height: 1.5; }
 .detail-list li.flagged span, .detail-list li.flagged strong { color: var(--negative); }
 
+/* Price floor */
+.check-field { display: flex; align-items: flex-start; gap: 9px; color: var(--navy); font-size: 13px; font-weight: 650; line-height: 1.4; }
+.check-field input { flex: 0 0 auto; width: 17px; min-height: 0; height: 17px; margin: 1px 0 0; padding: 0; accent-color: var(--navy); }
+.pricing-table { min-width: 880px; }
+.pricing-table .pricing-channel { width: 19%; }
+
 /* Profit allocation, tax and customs */
 .allocation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
 .detail-list li span small { display: block; margin-top: 2px; font-size: 11px; }

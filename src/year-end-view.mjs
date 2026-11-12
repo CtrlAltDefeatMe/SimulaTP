@@ -87,7 +87,8 @@ function adjustmentForm({ yearEnd, message }) {
   const option = (entry, mode) => {
     const amount = mode === 'target' ? entry.toTarget : mode === 'range' ? entry.toRange : 0;
     const unavailable = mode === 'range' && entry.statusBefore === 'within';
-    const label = mode === 'none' ? modeLabels.none : `${modeLabels[mode]} (${signedDollars(amount)})`;
+    const limited = entry.floorLimited?.[mode] ? ', limited by the price floor' : '';
+    const label = mode === 'none' ? modeLabels.none : `${modeLabels[mode]} (${signedDollars(amount)}${limited})`;
     return `<option value="${mode}" ${entry.mode === mode ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${html(label)}</option>`;
   };
   return `<form id="year-end-form" class="pricing-form">

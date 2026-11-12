@@ -14,17 +14,20 @@ export const ENTITIES = {
   UNRELATED: { name: 'Independent distributors', region: 'Europe', role: 'Third-party customer', external: true },
 }
 
+// The three lines differ in profitability, in the same order in every market: Control
+// Systems earns a high gross margin, Precision Components a middling one and Industrial
+// Modules a thin one. Price levels still differ by market through CHANNEL_FACTOR.
 export const PRODUCTS = {
   A: {
     name: 'Precision Components', price: 112, material: 31, usConversion: 17, plConversion: 13,
     demand: { US: 640, CH: 170, DE: 360, FR: 285, UK: 310, APAC: 430, CA: 245 },
   },
   B: {
-    name: 'Control Systems', price: 186, material: 63, usConversion: 25, plConversion: 20,
+    name: 'Control Systems', price: 186, material: 28, usConversion: 14, plConversion: 11,
     demand: { US: 430, CH: 110, DE: 240, FR: 200, UK: 185, APAC: 285, CA: 140 },
   },
   C: {
-    name: 'Industrial Modules', price: 268, material: 94, usConversion: 33, plConversion: 27,
+    name: 'Industrial Modules', price: 268, material: 150, usConversion: 50, plConversion: 43,
     demand: { US: 280, CH: 80, DE: 145, FR: 130, UK: 120, APAC: 180, CA: 90 },
   },
 }
@@ -59,7 +62,7 @@ const ZERO_SHOCK = { demand: 0, salesPrice: 0, materialCost: 0 }
 const DEFAULT_RD_RATE = 0.04
 // The default budget before R&D, less R&D at its default share of sales. Keeping the
 // target equal to the uncalibrated budget leaves the base unit costs unscaled.
-const DEFAULT_ANNUAL_MARGIN = 4_017_544.4704 / 10_487_570 - DEFAULT_RD_RATE
+const DEFAULT_ANNUAL_MARGIN = 3_980_550.8704 / 10_487_570 - DEFAULT_RD_RATE
 const RD_MARKUP = 0.10
 // Arm's-length ranges for the tested distributors. Each range must contain its target.
 const DEFAULT_RANGES = { lrd: { low: 0.015, high: 0.045 }, ffd: { low: 0.055, high: 0.095 } }
@@ -87,6 +90,9 @@ const valueOf = (lots, field) => sum(lots.map(lot => lot.quantity * lot[field]))
 const unitsOf = lots => sum(lots.map(lot => lot.quantity))
 const margin = (profit, revenue) => revenue ? profit / revenue : 0
 const roundCurrency = amount => Math.round(amount * 100) / 100
+// Round to the cent without crossing the limit: a floor rounds up, headroom rounds down.
+const ceilCurrency = amount => Math.ceil(amount * 100 - 1e-6) / 100
+const floorCurrency = amount => Math.floor(amount * 100 + 1e-6) / 100
 const basisPoints = value => Math.round(value * 10_000)
 // A market's shock is the group-wide shock plus that market's own deviation.
 const marketShock = (shocks, id, key) => shocks[key] + (shocks.markets?.[id]?.[key] ?? 0)
@@ -106,6 +112,8 @@ export function createConfig() {
     rd: { salesRate: DEFAULT_RD_RATE, usShare: 0.5 },
     tax: { rates: { ...DEFAULT_TAX_RATES } },
     customs: { rates: { ...DEFAULT_DUTY_RATES } },
+    // Optional rule: no goods transfer price may fall below standard cost plus this markup.
+    priceFloor: { enabled: false, markup: 0.05 },
     startingPriceMethod: 'fifo-policy',
     simulation: structuredClone(DEFAULT_SIMULATION),
     goodsPriceSchedule: [],
@@ -121,7 +129,7 @@ export function createConfig() {
 export function upgradeConfig(config, started) {
   const defaults = createConfig()
   const upgraded = { ...config }
-  for (const key of ['ranges', 'tax', 'customs', 'yearEnd']) upgraded[key] ??= defaults[key]
+  for (const key of ['ranges', 'tax', 'customs', 'yearEnd', 'priceFloor']) upgraded[key] ??= defaults[key]
   // A scenario saved before R&D existed ran without it.
   upgraded.rd ??= { salesRate: 0, usShare: defaults.rd.usShare }
   for (const kind of ['lrd', 'ffd']) {
@@ -209,6 +217,12 @@ function validateConfig(config) {
     }
   }
   if (config.policies.royaltyRate > MAX_ROYALTY_RATE) throw new RangeError('The royalty rate must be between 0% and 50%.')
+  if (config.priceFloor !== undefined) {
+    const { enabled, markup } = config.priceFloor ?? {}
+    if (typeof enabled !== 'boolean' || !Number.isFinite(markup) || markup < 0 || markup > 1) {
+      throw new RangeError('The price floor markup on standard cost must be between 0% and 100%.')
+    }
+  }
   for (const [kind, label] of [['lrd', 'LRD'], ['ffd', 'FFD']]) {
     if (config.ranges === undefined) continue
     const { low, high } = config.ranges[kind] ?? {}
@@ -309,13 +323,42 @@ function distributorUnitTp(product, market, policies) {
   return Math.max(0, basePrice(product, market) * (1 - rate - distributorCostRate(market)))
 }
 
+// The supplier's standard cost of a unit: budget materials and conversion, plus the
+// toll fee for goods the Swiss principal has made in Poland. Shocks do not move it.
+function standardUnitCost(from, product, policies) {
+  return from === 'US' ? baseGroupCost(product, 'US')
+    : baseGroupCost(product, 'PL') + product.plConversion * policies.polandMarkup
+}
+
+function standardCosts(policies, costScale) {
+  return Object.fromEntries(GOODS_ROUTES.map(({ key, from }) => [
+    key, Object.fromEntries(FAMILIES.map(family => [family, standardUnitCost(from, PRODUCTS[family], policies) * costScale])),
+  ]))
+}
+
+// The lowest price allowed on each route and product when the floor rule is on, else null.
+function priceFloors(config, costs) {
+  if (!config.priceFloor?.enabled) return null
+  return Object.fromEntries(Object.entries(costs).map(([key, products]) => [
+    key, Object.fromEntries(Object.entries(products).map(([family, cost]) => [
+      family, ceilCurrency(cost * (1 + config.priceFloor.markup)),
+    ])),
+  ]))
+}
+
+function atLeastFloor(prices, floors) {
+  if (!floors) return prices
+  return Object.fromEntries(Object.entries(prices).map(([key, products]) => [
+    key, Object.fromEntries(Object.entries(products).map(([family, price]) => [family, Math.max(price, floors[key][family])])),
+  ]))
+}
+
 function standardGoodsPrices(policies, costScale) {
   return Object.fromEntries(GOODS_ROUTES.map(({ key, from, to, markup }) => [
     key, Object.fromEntries(FAMILIES.map(family => {
       const product = PRODUCTS[family]
-      const standardCost = from === 'US' ? baseGroupCost(product, 'US')
-        : baseGroupCost(product, 'PL') + product.plConversion * policies.polandMarkup
-      const price = markup ? standardCost * costScale * (1 + policies[markup]) : distributorUnitTp(product, to, policies)
+      const price = markup ? standardUnitCost(from, product, policies) * costScale * (1 + policies[markup])
+        : distributorUnitTp(product, to, policies)
       return [family, roundCurrency(price)]
     })),
   ]))
@@ -612,16 +655,26 @@ function bookResearch(book, revenue, rd) {
 
 // After the December close, a distributor's supplier can raise or credit the year's
 // goods purchases. The adjustment is expensed in December and never enters inventory.
-function yearEndAdjustments(book, config, priorEntities) {
+function yearEndAdjustments(book, config, priorMonths, floors) {
   const provisional = book.financials().entities
+  const invoices = [...priorMonths.flatMap(month => month.transactions), ...book.transactions]
+    .filter(invoice => !invoice.external && invoice.category === 'goods' && invoice.quantity)
   return DISTRIBUTORS.map(id => {
-    const fullYear = distributorPnl(rollupPnl([...priorEntities.map(entities => entities[id]), provisional[id]]))
+    const fullYear = distributorPnl(rollupPnl([...priorMonths.map(month => month.entities[id]), provisional[id]]))
     const range = policyRange(config, id)
     const statusBefore = rangeStatus(fullYear.operatingMargin, range)
+    // A credit lowers what the distributor paid for the year's goods. With a price floor,
+    // it can go no further than the gap between the year's invoices and their floor value.
+    const headroom = floors ? floorCurrency(sum(invoices.filter(invoice => invoice.to === id).map(invoice =>
+      invoice.amount - invoice.quantity * floors[goodsRouteKey(invoice.from, id)][invoice.product]))) : Infinity
     // Profit above (or, if negative, below) what the given margin allows on the year's sales.
     const excessOver = allowed => roundCurrency(fullYear.operatingProfit - allowed * fullYear.revenue)
-    const toTarget = excessOver(range.target)
-    const toRange = statusBefore === 'within' ? 0 : excessOver(statusBefore === 'below' ? range.low : range.high)
+    const wanted = {
+      target: excessOver(range.target),
+      range: statusBefore === 'within' ? 0 : excessOver(statusBefore === 'below' ? range.low : range.high),
+    }
+    const toTarget = Math.max(wanted.target, -headroom)
+    const toRange = Math.max(wanted.range, -headroom)
     const mode = config.yearEnd?.[id] ?? 'none'
     const amount = mode === 'target' ? toTarget : mode === 'range' ? toRange : 0
     if (amount) {
@@ -632,6 +685,7 @@ function yearEndAdjustments(book, config, priorEntities) {
     const marginAfter = margin(fullYear.operatingProfit - amount, fullYear.revenue)
     return {
       id, supplier: sourceOf(id), mode, amount, toTarget, toRange, ...range,
+      floorLimited: { target: toTarget !== wanted.target, range: toRange !== wanted.range },
       revenue: fullYear.revenue, profitBefore: fullYear.operatingProfit,
       marginBefore: fullYear.operatingMargin, statusBefore, marginAfter, statusAfter: rangeStatus(marginAfter, range),
     }
@@ -662,6 +716,16 @@ function customsFor(config, transactions) {
     return [key, { from, to, rate, value, adjustment, duty: rate * (value + adjustment) }]
   }))
   return { routes, total: sum(Object.values(routes).map(route => route.duty)) }
+}
+
+/** Third-party sales and group cost of sales by product line for a closed month. */
+export function productLineResults(month) {
+  return FAMILIES.map(family => {
+    const sales = month.sales.filter(sale => sale.product === family)
+    const revenue = sum(sales.map(sale => sale.revenue))
+    const cogs = sum(sales.map(sale => sale.groupCogs))
+    return { product: family, units: sum(sales.map(sale => sale.quantity)), revenue, cogs, grossProfit: revenue - cogs, grossMargin: margin(revenue - cogs, revenue) }
+  })
 }
 
 /** Total income tax and customs duty for a set of closed months. */
@@ -726,7 +790,7 @@ function balances(book, stock, sales, entities, accounts) {
   return { inventory, consolidated, eliminations, reconciliation }
 }
 
-function closeMonth(stock, config, month, shocks, priceTable, costScale, priorEntities = null) {
+function closeMonth(stock, config, month, shocks, priceTable, costScale, yearToDate = null) {
   stock.startMonth()
   const vintage = '2027-' + String(month).padStart(2, '0')
   const book = new Ledger(month)
@@ -742,7 +806,7 @@ function closeMonth(stock, config, month, shocks, priceTable, costScale, priorEn
   const sales = sellGoods(stock, book, plans, shocks)
   const royaltyBase = bookOtherCosts(book, stock, sales, config, shocks)
   bookResearch(book, sum(sales.map(sale => sale.revenue)), config.rd)
-  const yearEnd = priorEntities ? yearEndAdjustments(book, config, priorEntities) : null
+  const yearEnd = yearToDate ? yearEndAdjustments(book, config, yearToDate.months, yearToDate.floors) : null
   const { entities, accounts } = book.financials()
   const financials = balances(book, stock, sales, entities, accounts)
   if (Object.values(financials.reconciliation).some(value => !Number.isFinite(value) || Math.abs(value) >= 0.005)) {
@@ -822,7 +886,9 @@ function scenarioBudget(config, months = 0) {
   const needsReference = annualOperatingMargin !== undefined || calibrateDistributorPrices
   const reference = needsReference ? budgetAtCost(config, 12, 1, provisional) : []
   const costScale = calibratedCostScale(annualOperatingMargin, reference)
-  const initial = costScale === 1 ? { ...provisional } : standardGoodsPrices(policies, costScale)
+  const costs = standardCosts(policies, costScale)
+  const floors = priceFloors(config, costs)
+  let initial = costScale === 1 ? { ...provisional } : standardGoodsPrices(policies, costScale)
   const openingNotes = {}
   let priceChanged = false
 
@@ -831,7 +897,7 @@ function scenarioBudget(config, months = 0) {
       const { key, to } = route
       const target = policies[LRD.has(to) ? 'lrdMargin' : 'ffdMargin']
       const planned = distributorPnl(rollupPnl(reference.map(month => month.entities[to])))
-      const { recommended, note } = distributorQuote(route, reference, planned, 1, provisional[key], provisional[key], target)
+      const { recommended, note } = distributorQuote(route, reference, planned, 1, provisional[key], provisional[key], target, floors?.[key])
       const prices = Object.fromEntries(FAMILIES.map(family => [
         family, recommended?.[family] ?? provisional[key][family],
       ]))
@@ -840,10 +906,15 @@ function scenarioBudget(config, months = 0) {
       if (note) openingNotes[key] = note
     }
   }
+  if (floors) {
+    const raised = atLeastFloor(initial, floors)
+    priceChanged ||= GOODS_ROUTES.some(({ key }) => FAMILIES.some(family => raised[key][family] !== provisional[key][family]))
+    initial = raised
+  }
 
   const budget = needsReference && costScale === 1 && !priceChanged ? reference.slice(0, months)
     : budgetAtCost(config, months, costScale, initial)
-  return { costScale, initial, openingNotes, openingPriceMethod, budget }
+  return { costScale, initial, openingNotes, openingPriceMethod, budget, costs, floors }
 }
 
 function distributorPnl(result) {
@@ -920,18 +991,31 @@ export function profitAllocation(months) {
   }
 }
 
-function crossSupplyQuote(route, forecast, policies) {
+function crossSupplyQuote(route, forecast, policies, floor = null) {
   const invoices = forecast.flatMap(month => month.transactions.filter(transaction => transaction.policy === route.policy))
+  const held = []
   const recommended = Object.fromEntries(FAMILIES.map(family => {
     const shipments = invoices.filter(invoice => invoice.product === family)
     const units = sum(shipments.map(invoice => invoice.quantity))
     const sellerCost = sum(shipments.map(invoice => invoice.basis))
-    return [family, units ? roundCurrency(sellerCost / units * (1 + policies[route.markup])) : null]
+    if (!units) return [family, null]
+    const price = roundCurrency(sellerCost / units * (1 + policies[route.markup]))
+    if (floor && price < floor[family]) held.push(family)
+    return [family, floor ? Math.max(price, floor[family]) : price]
   }))
-  return { recommended, note: invoices.length ? '' : 'No shipments are forecast for this route through December.' }
+  const note = !invoices.length ? 'No shipments are forecast for this route through December.' : floorNote(held)
+  return { recommended, note, held }
 }
 
-function distributorQuote(route, forecast, fullYear, startMonth, current, standard, target) {
+function floorNote(held, short = false) {
+  if (!held.length) return ''
+  const names = held.map(family => PRODUCTS[family].name).join(', ')
+  return short
+    ? `Every product is at the price floor, so the full-year target is out of reach. Held at the floor: ${names}.`
+    : `Held at the price floor: ${names}.`
+}
+
+function distributorQuote(route, forecast, fullYear, startMonth, current, standard, target, floor = null) {
   const vintage = '2027-' + String(startMonth).padStart(2, '0')
   const positions = forecast.flatMap(month => month.inventory.filter(bin => bin.owner === route.to))
   // Only issues from future receipts can change this year's cost of goods sold.
@@ -946,22 +1030,39 @@ function distributorQuote(route, forecast, fullYear, startMonth, current, standa
   const adjustableCogs = sum(FAMILIES.map(family => adjustableUnits[family] * current[family]))
   const fixedCogs = fullYear.cogs - adjustableCogs
   const costAllowance = fullYear.revenue * (1 - target) - fullYear.operatingExpenses - fixedCogs
-  const standardCogs = sum(FAMILIES.map(family => adjustableUnits[family] * standard[family]))
   const allowance = Math.max(0, costAllowance)
-  const recommended = Object.fromEntries(FAMILIES.map(family => {
-    const price = standardCogs ? standard[family] * allowance / standardCogs : allowance / units
-    return [family, adjustableUnits[family] ? roundCurrency(price) : null]
-  }))
+  const sold = FAMILIES.filter(family => adjustableUnits[family])
+  // Spread the cost the target allows over the products in proportion to their standard
+  // prices. A product that would fall below its floor is held there, and the rest absorb it.
+  const held = new Set()
+  let prices
+  let short = false
+  for (;;) {
+    const free = sold.filter(family => !held.has(family))
+    const remaining = allowance - sum([...held].map(family => adjustableUnits[family] * floor[family]))
+    short = held.size > 0 && !free.length && remaining < -0.005
+    const freeStandard = sum(free.map(family => adjustableUnits[family] * standard[family]))
+    const freeUnits = sum(free.map(family => adjustableUnits[family]))
+    prices = Object.fromEntries(free.map(family => [
+      family, freeStandard ? standard[family] * Math.max(0, remaining) / freeStandard : Math.max(0, remaining) / freeUnits,
+    ]))
+    const below = floor ? free.filter(family => prices[family] < floor[family]) : []
+    if (!below.length) break
+    for (const family of below) held.add(family)
+  }
+  const recommended = Object.fromEntries(FAMILIES.map(family => [
+    family, !adjustableUnits[family] ? null : held.has(family) ? floor[family] : roundCurrency(prices[family]),
+  ]))
   const note = costAllowance < 0
     ? 'The full-year target is out of reach at any nonnegative price because of costs already incurred or carried in.'
-    : ''
-  return { recommended, note }
+    : floorNote([...held], short)
+  return { recommended, note, held: [...held] }
 }
 
 export function reviewGoodsPricing(config, revealed) {
   if (!Number.isInteger(revealed) || revealed < 0 || revealed > 12) throw new RangeError('Reveal progress must be between zero and twelve months.')
   validateConfig(config)
-  const { costScale, initial, openingNotes, openingPriceMethod } = scenarioBudget(config)
+  const { costScale, initial, openingNotes, openingPriceMethod, costs, floors } = scenarioBudget(config)
   const current = goodsPricesForMonth(config, Math.min(revealed + 1, 12), initial)
   const effectiveMonth = quarterPricingMonth(revealed)
   const stock = seedOpeningStock(costScale)
@@ -971,7 +1072,7 @@ export function reviewGoodsPricing(config, revealed) {
   for (const [index, shock] of pastShocks.entries()) {
     const month = index + 1
     actual.push(closeMonth(stock, config, month, shock, goodsPricesForMonth(config, month, initial), costScale,
-      month === 12 ? actual.map(closed => closed.entities) : null))
+      month === 12 ? { months: [...actual], floors } : null))
   }
   const forecast = []
   for (let month = revealed + 1; month <= 12; month++) {
@@ -985,8 +1086,8 @@ export function reviewGoodsPricing(config, revealed) {
     let quote = {}
     if (effectiveMonth) {
       const fullYear = entityResults.find(row => row.id === to).fullYear
-      quote = markup ? crossSupplyQuote(route, forecast, config.policies)
-        : distributorQuote(route, forecast, distributorPnl(fullYear), effectiveMonth, current[key], initial[key], targetMargin)
+      quote = markup ? crossSupplyQuote(route, forecast, config.policies, floors?.[key])
+        : distributorQuote(route, forecast, distributorPnl(fullYear), effectiveMonth, current[key], initial[key], targetMargin, floors?.[key])
     }
     const startingQuote = revealed === 0 && openingPriceMethod === 'fifo-policy' && !openingNotes[key] ? initial[key] : null
     return {
@@ -994,6 +1095,7 @@ export function reviewGoodsPricing(config, revealed) {
       openingNote: openingNotes[key],
       prices: FAMILIES.map(product => ({
         product, applied: current[key][product], recommended: quote.recommended?.[product] ?? startingQuote?.[product] ?? null,
+        standardCost: costs[key][product], floor: floors?.[key][product] ?? null,
       })),
     }
   })
@@ -1002,6 +1104,7 @@ export function reviewGoodsPricing(config, revealed) {
     effectiveMonth, routes, entityResults, actual, forecast, openingPriceMethod,
     allocation: profitAllocation(fullYear), royalty: royaltyCheck(config), fullYear: summarizeTaxAndCustoms(config, fullYear),
     yearEnd: actual[11]?.yearEnd ?? null, priceRevisions: config.goodsPriceSchedule?.length ?? 0,
+    priceFloor: floors ? { ...config.priceFloor } : null,
   }
 }
 
@@ -1010,7 +1113,16 @@ export function applyGoodsPrices(config, revealed, overrides = {}) {
   if (!startMonth) throw new RangeError('Review and change goods prices after closing March, June, or September.')
   validateConfig(config)
   validatePriceTable(overrides)
-  const { initial } = scenarioBudget(config)
+  const { initial, floors } = scenarioBudget(config)
+  if (floors) {
+    for (const [key, products] of Object.entries(overrides)) {
+      for (const [family, price] of Object.entries(products)) {
+        if (price >= floors[key][family]) continue
+        const { from, to } = GOODS_ROUTES.find(route => route.key === key)
+        throw new RangeError(`${PRODUCTS[family].name}, ${ENTITIES[from].name} to ${ENTITIES[to].name}: the price cannot go below the floor of $${floors[key][family].toFixed(2)}, which is standard cost plus ${+(config.priceFloor.markup * 100).toFixed(2)}%.`)
+      }
+    }
+  }
   const current = goodsPricesForMonth(config, startMonth, initial)
   const changed = Object.entries(overrides).some(([key, products]) =>
     Object.entries(products).some(([family, price]) => price !== current[key][family]))
@@ -1039,7 +1151,7 @@ export function applyYearEndAdjustments(config, revealed, choices = {}) {
 
 function runPeriod(config, months) {
   validateConfig(config)
-  const { budget, costScale, initial } = scenarioBudget(config, months)
+  const { budget, costScale, initial, floors } = scenarioBudget(config, months)
   const actualStock = seedOpeningStock(costScale)
   const shocks = simulateShocks(config.simulation, months, MARKETS)
   const actual = []
@@ -1048,7 +1160,7 @@ function runPeriod(config, months) {
     const budgetMonth = budget[month - 1]
     const priceTable = goodsPricesForMonth(config, month, initial)
     const actualMonth = closeMonth(actualStock, config, month, shocks[month - 1], priceTable, costScale,
-      month === 12 ? actual.map(closed => closed.entities) : null)
+      month === 12 ? { months: [...actual], floors } : null)
     actual.push(actualMonth)
     variance.push(explainVariance(budgetMonth, actualMonth))
   }

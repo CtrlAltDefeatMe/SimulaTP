@@ -37,7 +37,7 @@ function groupRows({ policies, ranges }) {
 }
 
 export function renderBrief({ config, revealed }) {
-  const { policies } = config;
+  const { policies, priceFloor } = config;
   const start = revealed ? 'Return to the dashboard' : 'Open the dashboard';
   return `
     <div class="brief-grid">
@@ -45,6 +45,7 @@ export function renderBrief({ config, revealed }) {
         <div class="panel-header"><h2 id="brief-case-heading">The case</h2></div>
         <div class="brief-copy">
           <p>You lead transfer pricing for a US-headquartered industrial group. It makes three product families in the United States and Poland and sells them to third-party customers in North America, Europe and Asia.</p>
+          <p>The lines are not equally profitable. Control Systems earns a high margin, Precision Components a middling one and Industrial Modules a thin one. The order is the same in every market, though price levels differ.</p>
           <p>The 2027 budget is set and the year is about to start. All figures are synthetic and in US dollars.</p>
         </div>
       </section>
@@ -73,6 +74,9 @@ export function renderBrief({ config, revealed }) {
           <li>Reveal actuals one month at a time. The variance bridge explains each month’s gap to budget.</li>
           <li>After the March, June and September closes, open <a href="#pricing">Goods transfer prices</a>. The forecast shows where each distributor will finish the year at current prices. Take the policy price, enter your own, or leave prices alone.</li>
           <li>New prices apply to new shipments only. Stock a distributor already holds keeps its old cost and is sold first, so a price change takes time to reach its margin.</li>
+          <li>${priceFloor?.enabled
+            ? `A price floor is in force. No goods price can go below standard cost plus ${percent.format(priceFloor.markup)}, and a year-end credit cannot undo it.`
+            : 'No price floor is set, so a goods price can fall below the supplier’s standard cost. You can set one in Scenario settings.'}</li>
           <li>After December, choose a year-end adjustment for each distributor and read the year-end review.</li>
         </ol>
       </section>
@@ -91,6 +95,7 @@ export function renderBrief({ config, revealed }) {
         <li>Which distributors needed a price change at each review, and which stayed inside their range without one?</li>
         <li>How much of a March price change reaches the full-year margin? What would the same change achieve in September?</li>
         <li>Switzerland keeps the residual on European and Asian sales after routine returns and the royalty. The United States owns the IP and funds the R&amp;D. Does a ${percent.format(policies.royaltyRate)} royalty leave the profit where the functions, assets and risks sit? Change the rate in Scenario settings and watch the split.</li>
+        <li>Where does the policy price for Industrial Modules fall below the supplier’s standard cost? Who should bear that loss, and what does a price floor do to the distributor’s margin?</li>
         <li>When is a year-end adjustment to the edge of the range enough, and when is the target the better aim?</li>
         <li>Which year-end adjustments cost customs duty, and which leave duty overpaid?</li>
       </ul>

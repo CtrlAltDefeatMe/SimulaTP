@@ -4,6 +4,7 @@ import { allocationPanel, renderYearEnd } from './year-end-view.mjs';
 const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const compactPercent = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 4 });
+const markupPercent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const monthNames = new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' });
 const reviewMonths = [3, 6, 9];
 const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range', off: 'Out of policy' };
@@ -42,7 +43,7 @@ function priceInput(route, price) {
   const label = `${productName(price.product)} new price in USD per unit, ${entityName(route.from)} to ${entityName(route.to)}`;
   return `<div class="price-input">
     <span aria-hidden="true">$</span>
-    <input type="number" inputmode="decimal" min="0" step="0.01" aria-label="${html(label)}"
+    <input type="number" inputmode="decimal" min="${Number.isFinite(price.floor) ? price.floor.toFixed(2) : 0}" step="0.01" aria-label="${html(label)}"
       aria-describedby="pricing-override-help"
       data-goods-price-route="${html(route.key)}" data-goods-price-product="${html(price.product)}">
   </div>`;
@@ -66,14 +67,26 @@ function shortPolicy(route) {
   return route.policyLabel ?? POLICY_LABELS[route.policy] ?? '';
 }
 
-function pricingTable(routes, editing) {
+// The current price as a markup on the supplier's standard cost. A price below cost shows in red.
+function costMarkup(price) {
+  if (!Number.isFinite(price.standardCost) || !price.standardCost) return '—';
+  const markup = price.applied / price.standardCost - 1;
+  const atFloor = Number.isFinite(price.floor) && price.applied <= price.floor;
+  return `<span class="${markup < 0 ? 'negative' : ''}">${markup < 0 ? '−' : ''}${markupPercent.format(Math.abs(markup))}</span>${atFloor ? '<small class="pricing-margin-target">At the floor</small>' : ''}`;
+}
+
+function pricingTable(routes, editing, priceFloor) {
+  const rule = priceFloor
+    ? `Price floor: standard cost plus ${compactPercent.format(priceFloor.markup)}. No price can go below it.`
+    : 'No price floor is set. A price can go below standard cost.';
   return `<section class="panel" aria-labelledby="goods-pricing-table-heading">
-    <div class="panel-header"><div><h2 id="goods-pricing-table-heading">Goods prices by channel</h2><p class="subtitle">USD per unit</p></div></div>
+    <div class="panel-header"><div><h2 id="goods-pricing-table-heading">Goods prices by channel</h2><p class="subtitle">USD per unit · ${rule}</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="goods-pricing-table-heading">
       <table class="pricing-table" aria-labelledby="goods-pricing-table-heading">
         <thead><tr>
           <th scope="col">Channel</th><th scope="col">TP policy</th><th scope="col">Product family</th>
-          <th scope="col">Current price</th><th scope="col">Policy price</th><th scope="col">New price</th>
+          <th scope="col">Standard cost</th><th scope="col">Current price</th><th scope="col">Markup on cost</th>
+          <th scope="col">Policy price</th><th scope="col">New price</th>
         </tr></thead>
         ${routes.map(route => `<tbody data-pricing-channel="${html(route.key)}">
           ${route.prices.map((price, index) => `<tr>
@@ -81,11 +94,13 @@ function pricingTable(routes, editing) {
               ${html(entityName(route.from))} <span aria-hidden="true">→</span><span class="visually-hidden"> to </span> ${html(entityName(route.to))}
             </th><td class="pricing-policy" rowspan="${route.prices.length}">${html(shortPolicy(route))}</td>` : ''}
             <th scope="row" class="pricing-family">${html(productName(price.product))}</th>
+            <td>${format(price.standardCost)}${Number.isFinite(price.floor) ? `<small class="pricing-margin-target">Floor ${format(price.floor)}</small>` : ''}</td>
             <td>${format(price.applied)}</td>
+            <td>${costMarkup(price)}</td>
             <td>${editing ? policyPriceButton(route, price) : format(price.recommended)}</td>
             <td class="pricing-edit">${editing ? priceInput(route, price) : '—'}</td>
           </tr>`).join('')}
-          ${editing && route.note ? `<tr class="pricing-route-note"><td colspan="6">${html(route.note)}</td></tr>` : ''}
+          ${editing && route.note ? `<tr class="pricing-route-note"><td colspan="8">${html(route.note)}</td></tr>` : ''}
         </tbody>`).join('')}
       </table>
     </div>
@@ -178,7 +193,7 @@ export function renderGoodsPricing(review) {
     ? renderYearEnd({ ...review, message: review.yearEndMessage }) : '';
   const results = `${yearEnd}${entityResultsPanel(revealed, entityResults, routes)}${allocationPanel(review)}`;
   const assumptions = openingInventoryPanel(routes, openingPriceMethod);
-  const prices = pricingTable(routes, editing);
+  const prices = pricingTable(routes, editing, review.priceFloor);
   if (!editing) return `${results}${assumptions}
     ${nextReview ? `<section class="panel pricing-period" aria-labelledby="pricing-review-heading">
       <div>

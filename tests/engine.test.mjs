@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyYearEndAdjustments, createConfig, profitAllocation, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms,
-  upgradeConfig,
+  applyGoodsPrices, applyYearEndAdjustments, createConfig, productLineResults, profitAllocation, reviewGoodsPricing, royaltyCheck,
+  runYear, summarizeTaxAndCustoms, upgradeConfig,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks } from '../src/simulation.mjs'
 
@@ -12,7 +12,7 @@ const total = (months, key) => months.reduce((sum, month) => sum + month.consoli
 const distributors = ['DE', 'FR', 'UK', 'APAC', 'CA']
 const policyRows = review => Object.fromEntries(review.entityResults.filter(row => distributors.includes(row.id)).map(row => [row.id, row.policy]))
 
-// The scenario as it stood before R&D, market variation and the tax layers were added.
+// A scenario as saved before R&D, market variation and the tax layers were added.
 function legacyConfig() {
   const config = createConfig()
   config.rd.salesRate = 0
@@ -20,6 +20,10 @@ function legacyConfig() {
   config.simulation.marketVariation = { demand: 0, salesPrice: 0 }
   return config
 }
+
+const withFloor = (markup = 0.05) => ({ ...createConfig(), priceFloor: { enabled: true, markup } })
+const goodsInvoices = months => months.flatMap(month => month.transactions)
+  .filter(invoice => !invoice.external && invoice.category === 'goods' && invoice.quantity)
 
 test('the default budget meets its margin target without rescaling unit costs', () => {
   const config = createConfig()
@@ -41,12 +45,96 @@ test('group-wide shocks for a seed do not depend on the market list', () => {
   assert.ok(Math.abs(withMarkets[0].markets.DE.salesPrice) <= DEFAULT_SIMULATION.marketVariation.salesPrice)
 })
 
-test('with the new layers switched off the engine reproduces the original January close', () => {
-  const { actual } = runYear(legacyConfig())
+test('without market variation every limited-risk distributor posts the same margin', () => {
+  const { actual, variance } = runYear(legacyConfig())
   assert.equal(cents(actual[0].consolidated.revenue), 805_677.32)
-  assert.equal(cents(actual[0].consolidated.operatingProfit), 335_489.81)
   const margins = ['DE', 'FR', 'UK'].map(id => actual[0].entities[id].operatingMargin.toFixed(4))
   assert.deepEqual(margins, ['0.1146', '0.1146', '0.1146'])
+  assert.ok(variance.every(month => Math.abs(month.check) < 0.005))
+})
+
+test('the product lines keep the same profitability order in every market', () => {
+  const { budget, actual } = runYear(createConfig())
+  for (const month of [...budget, ...actual]) {
+    const byMarket = new Map()
+    for (const sale of month.sales) {
+      if (!sale.quantity) continue
+      byMarket.set(sale.seller, { ...byMarket.get(sale.seller), [sale.product]: 1 - sale.groupCogs / sale.revenue })
+    }
+    for (const [market, margins] of byMarket) {
+      // Control Systems is the high-margin line, Precision Components the middle, Industrial Modules the thin one.
+      assert.ok(margins.B > margins.A && margins.A > margins.C, `${market} in month ${month.month}`)
+    }
+  }
+  const lines = Object.fromEntries(productLineResults(budget[0]).map(line => [line.product, line.grossMargin]))
+  assert.ok(lines.B > 0.7 && lines.A > 0.5 && lines.A < 0.7 && lines.C < 0.35)
+})
+
+test('with no floor a thin-margin product can be priced below standard cost', () => {
+  const review = reviewGoodsPricing(createConfig(), 0)
+  const asia = review.routes.find(route => route.key === 'CH-APAC').prices.find(price => price.product === 'C')
+  assert.ok(asia.applied < asia.standardCost)
+  assert.equal(asia.floor, null)
+  assert.equal(review.priceFloor, null)
+})
+
+test('the price floor holds every goods price at or above standard cost plus the markup', () => {
+  const config = withFloor(0.05)
+  const year = runYear(config)
+  const review = reviewGoodsPricing(config, 3)
+  const floors = Object.fromEntries(review.routes.map(route => [route.key, Object.fromEntries(route.prices.map(price => [price.product, price]))]))
+  for (const prices of Object.values(floors)) {
+    for (const price of Object.values(prices)) {
+      assert.ok(price.floor >= price.standardCost * 1.05 - 1e-9 && price.floor < price.standardCost * 1.05 + 0.01)
+      assert.ok(price.applied >= price.floor)
+      if (price.recommended !== null) assert.ok(price.recommended >= price.floor)
+    }
+  }
+  for (const invoice of goodsInvoices([...year.budget, ...year.actual])) {
+    const floor = floors[invoice.from + '-' + invoice.to][invoice.product].floor
+    assert.ok(invoice.amount / invoice.quantity >= floor - 1e-6, `${invoice.from}-${invoice.to} ${invoice.product}`)
+  }
+  // The thin-margin product is held at its floor for Asia, and the other products carry the difference.
+  assert.equal(floors['CH-APAC'].C.applied, floors['CH-APAC'].C.floor)
+  const open = reviewGoodsPricing(createConfig(), 0).routes.find(route => route.key === 'CH-APAC').prices
+  assert.ok(floors['CH-APAC'].A.applied <= open.find(price => price.product === 'A').applied)
+  const budgetMargin = id => {
+    const row = reviewGoodsPricing(config, 0).entityResults.find(entry => entry.id === id)
+    return Math.round(row.policy.forecast * 10_000)
+  }
+  assert.equal(budgetMargin('APAC'), 750)
+  assert.ok(year.variance.every(month => Math.abs(month.check) < 0.005))
+})
+
+test('a price entered below the floor is refused', () => {
+  const config = withFloor(0.05)
+  const floor = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices.find(price => price.product === 'C').floor
+  const oneCentBelow = cents(floor - 0.01)
+  assert.throws(() => applyGoodsPrices(config, 3, { 'CH-DE': { C: oneCentBelow } }), /cannot go below the floor/)
+  const applied = applyGoodsPrices(config, 3, { 'CH-DE': { C: floor } })
+  assert.equal(applied.goodsPriceSchedule.at(-1).prices['CH-DE'].C, floor)
+  // Without the rule the same price is accepted.
+  applyGoodsPrices(createConfig(), 3, { 'CH-DE': { C: oneCentBelow } })
+  assert.throws(() => runYear({ ...createConfig(), priceFloor: { enabled: true, markup: 1.5 } }), /price floor markup/)
+})
+
+test('a year-end credit cannot take the year\'s purchases below their floor value', () => {
+  // A high floor leaves little room between the invoices and their floor value.
+  const config = withFloor(0.6)
+  const choices = Object.fromEntries(distributors.map(id => [id, 'target']))
+  const adjusted = applyYearEndAdjustments(config, 12, choices)
+  const year = runYear(adjusted)
+  const review = reviewGoodsPricing(adjusted, 12)
+  const floors = Object.fromEntries(review.routes.map(route => [route.key, Object.fromEntries(route.prices.map(price => [price.product, price.floor]))]))
+  let limited = 0
+  for (const entry of review.yearEnd) {
+    const invoices = goodsInvoices(year.actual).filter(invoice => invoice.to === entry.id)
+    const headroom = invoices.reduce((total, invoice) => total + invoice.amount - invoice.quantity * floors[invoice.from + '-' + invoice.to][invoice.product], 0)
+    assert.ok(entry.amount >= -headroom - 0.01, entry.id)
+    if (entry.floorLimited.target) limited += 1
+  }
+  assert.ok(limited > 0)
+  assert.ok(Math.abs(year.actual[11].reconciliation.profitDifference) < 0.005)
 })
 
 test('market variation makes distributors diverge', () => {
@@ -121,12 +209,17 @@ test('income tax is each entity\'s rate applied to its operating profit', () => 
   assert.ok(tax.effectiveRate > 0.15 && tax.effectiveRate < 0.30)
 })
 
-test('a scenario saved before these settings existed still runs and keeps its results', () => {
-  const { ranges, tax, customs, yearEnd, ...saved } = legacyConfig()
+test('a scenario saved before these settings existed still runs', () => {
+  const { ranges, tax, customs, yearEnd, priceFloor, ...saved } = legacyConfig()
   delete saved.simulation.marketVariation
   const inProgress = upgradeConfig(structuredClone(saved), true)
-  assert.equal(cents(runYear(inProgress).actual[0].consolidated.operatingProfit), 335_489.81)
+  const year = runYear(inProgress)
+  // Its margin target and its group-wide shocks are kept. Product costs are the current ones.
+  const budgetMargin = total(year.budget, 'operatingProfit') / total(year.budget, 'revenue')
+  assert.ok(Math.abs(budgetMargin - saved.annualOperatingMargin) < 1e-9)
+  assert.equal(cents(year.actual[0].consolidated.revenue), 805_677.32)
   assert.equal(inProgress.simulation.marketVariation, undefined)
+  assert.deepEqual(inProgress.priceFloor, priceFloor)
   const unstarted = upgradeConfig(structuredClone(saved), false)
   assert.deepEqual(unstarted.simulation.marketVariation, { ...DEFAULT_SIMULATION.marketVariation })
   assert.deepEqual(unstarted.ranges, ranges)
