@@ -84,7 +84,7 @@ export function renderBrief({ config, revealed }) {
           <li>${priceFloor?.enabled
             ? `A price floor is in force. No goods price can go below standard cost plus ${percent.format(priceFloor.markup)}, and a year-end credit cannot undo it.`
             : 'No price floor is set, so a goods price can fall below the supplier’s standard cost. You can set one in Scenario settings.'}</li>
-          <li>The December close brings each entity’s local statutory adjustment: between 0% and ${percent.format(config.simulation?.statAdjustment?.max ?? 0)} of its operating expenses, up or down. A result inside the range on US GAAP can land outside it in the local accounts.</li>
+          <li>At the December close each entity outside the United States has a ${percent.format(config.simulation?.statAdjustment?.probability ?? 1)} chance of an unexpected GAAP-to-stat adjustment: up to ${percent.format(config.simulation?.statAdjustment?.max ?? 0)} of its operating expenses, up or down. A result inside the range on US GAAP can land outside it in the local accounts.</li>
           <li>A pop-up then explains where each tested entity finished and why. Choose a year-end adjustment for each one and read the year-end review.</li>
           <li>To see what happens when nobody acts, use <strong>Run the full year</strong> on the Dashboard. It reveals every month at unchanged prices and fees. You can then replay the same year and manage it.</li>
         </ol>

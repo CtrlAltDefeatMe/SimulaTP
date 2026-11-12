@@ -340,11 +340,12 @@ test('a service fee set at a quarterly review applies from the next month and it
   assert.equal(reviewGoodsPricing(revised, 9).priceRevisions, 1)
 })
 
-test('the local statutory adjustment is a signed share of operating expenses within its limits', () => {
+test('the GAAP-to-stat adjustment is a signed share of operating expenses within its limits', () => {
   const ids = Array.from({ length: 4000 }, (_, index) => 'entity' + index)
-  const rates = Object.values(simulateStatAdjustments(DEFAULT_SIMULATION, ids))
+  const always = { ...DEFAULT_SIMULATION, statAdjustment: { ...DEFAULT_SIMULATION.statAdjustment, probability: 1 } }
+  const rates = Object.values(simulateStatAdjustments(always, ids))
   const sizes = rates.map(Math.abs)
-  assert.ok(Math.max(...sizes) <= 0.10 && Math.min(...sizes) >= 0)
+  assert.ok(Math.max(...sizes) <= 0.10 && Math.min(...sizes) > 0)
   const average = sizes.reduce((sum, size) => sum + size, 0) / sizes.length
   assert.ok(Math.abs(average - 0.03) < 0.002)
   const raising = rates.filter(rate => rate > 0).length / rates.length
@@ -352,7 +353,27 @@ test('the local statutory adjustment is a signed share of operating expenses wit
   assert.deepEqual(simulateStatAdjustments(DEFAULT_SIMULATION, ['DE', 'FR']), simulateStatAdjustments(DEFAULT_SIMULATION, ['DE', 'FR']))
   const off = simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: { max: 0, mean: 0 } }, ['DE'])
   assert.equal(off.DE, 0)
-  assert.throws(() => simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: { max: 0.05, mean: 0.06 } }, ['DE']), /statutory adjustment/)
+  assert.throws(() => simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: { max: 0.05, mean: 0.06 } }, ['DE']), /GAAP-to-stat adjustment/)
+})
+
+test('an entity has a GAAP-to-stat adjustment only with the set probability', () => {
+  const ids = Array.from({ length: 4000 }, (_, index) => 'entity' + index)
+  const withChance = probability => ({ ...DEFAULT_SIMULATION, statAdjustment: { ...DEFAULT_SIMULATION.statAdjustment, probability } })
+  assert.equal(DEFAULT_SIMULATION.statAdjustment.probability, 0.5)
+  const half = simulateStatAdjustments(DEFAULT_SIMULATION, ids)
+  const always = simulateStatAdjustments(withChance(1), ids)
+  const adjusted = ids.filter(id => half[id] !== 0)
+  assert.ok(adjusted.length / ids.length > 0.47 && adjusted.length / ids.length < 0.53)
+  // The chance decides whether an entity is adjusted. It does not change the size it would have had.
+  for (const id of adjusted) assert.equal(half[id], always[id])
+  const average = adjusted.reduce((sum, id) => sum + Math.abs(half[id]), 0) / adjusted.length
+  assert.ok(Math.abs(average - 0.03) < 0.003)
+  assert.ok(Object.values(simulateStatAdjustments(withChance(0), ids)).every(rate => rate === 0))
+  assert.ok(Object.values(always).every(rate => rate !== 0))
+  // A scenario saved before the chance existed adjusted every entity.
+  const { probability, ...legacy } = DEFAULT_SIMULATION.statAdjustment
+  assert.deepEqual(simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: legacy }, ids), always)
+  assert.throws(() => simulateStatAdjustments(withChance(1.2), ['DE']), /chance of a GAAP-to-stat adjustment/)
 })
 
 test('the range is tested on US GAAP during the year and on local statutory results after December', () => {
@@ -371,7 +392,9 @@ test('the range is tested on US GAAP during the year and on local statutory resu
     const profit = result.revenue - result.rdServiceRevenue - result.cogs - result.otherOperatingExpenses - stat.adjustment
     const base = ['PL', 'IN'].includes(id) ? result.otherOperatingExpenses + stat.adjustment : result.revenue - result.rdServiceRevenue
     assert.ok(Math.abs(policy.forecast - profit / base) < 1e-9, id)
-    assert.notEqual(bp(policy.forecast), bp(policy.gaap), id)
+    // Only an entity that drew an adjustment differs from its US GAAP result.
+    if (stat.rate) assert.notEqual(bp(policy.forecast), bp(policy.gaap), id)
+    else assert.equal(policy.forecast, policy.gaap, id)
   }
   // The adjustment sits outside the US GAAP ledger, so the consolidated result is untouched.
   assert.ok(Math.abs(actual[11].reconciliation.profitDifference) < 0.005)

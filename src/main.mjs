@@ -793,7 +793,7 @@ function renderSettings() {
   const marketVariation = simulation.marketVariation ?? { demand: 0, salesPrice: 0 };
   // A scenario saved before these settings existed runs without them.
   const serviceCostVariation = simulation.serviceCostVariation ?? 0;
-  const statAdjustment = simulation.statAdjustment ?? { max: 0, mean: 0 };
+  const statAdjustment = { max: 0, mean: 0, probability: 1, ...simulation.statAdjustment };
   const royalty = royaltyCheck(state.config);
   // Applying a scenario starts a new year, so the budget is the projection that matters here.
   const licensee = profitAllocation(state.year.budget);
@@ -880,13 +880,14 @@ function renderSettings() {
             </div>
           </section>
           <section class="panel" aria-labelledby="stat-settings-heading">
-            <div class="panel-header"><div><h2 id="stat-settings-heading">US GAAP to local statutory adjustment</h2><p class="subtitle">Revealed at the December close · share of each local entity’s operating expenses</p></div></div>
+            <div class="panel-header"><div><h2 id="stat-settings-heading">GAAP-to-stat adjustment</h2><p class="subtitle">Revealed at the December close · share of each local entity’s operating expenses</p></div></div>
             <div class="form-fields">
+              <label class="field">Chance that an entity has an adjustment (%)${numberInput('statAdjustment.probability', percentInput(statAdjustment.probability), { min: 0, max: 100 })}</label>
               <div class="field-pair">
                 <label class="field">Largest adjustment (%)${numberInput('statAdjustment.max', percentInput(statAdjustment.max), { min: 0, max: 100 })}</label>
                 <label class="field">Average adjustment (%)${numberInput('statAdjustment.mean', percentInput(statAdjustment.mean), { min: 0, max: 100 })}</label>
               </div>
-              <p class="field-note">Each entity outside the United States draws its own adjustment for the year. It can add or remove local cost. The arm’s-length ranges and local income tax are tested on the adjusted results. Enter 0 for both to keep local results equal to US GAAP.</p>
+              <p class="field-note">Each entity outside the United States has this chance of an unexpected adjustment for the year. When one occurs it can add or remove local cost, with the size limits above. The arm’s-length ranges and local income tax are tested on the adjusted results. Enter a 0% chance to keep local results equal to US GAAP.</p>
             </div>
           </section>
           <section class="panel" aria-labelledby="ranges-heading">
@@ -943,7 +944,10 @@ function readSettings(form) {
   config.priceFloor = { enabled: data.get('priceFloor.enabled') === 'on', markup: Number(data.get('priceFloor.markup')) / 100 };
   config.services.polandFixedShare = Number(data.get('services.polandFixedShare')) / 100;
   config.simulation.serviceCostVariation = Number(data.get('serviceCostVariation')) / 100;
-  config.simulation.statAdjustment = { max: Number(data.get('statAdjustment.max')) / 100, mean: Number(data.get('statAdjustment.mean')) / 100 };
+  config.simulation.statAdjustment = {
+    max: Number(data.get('statAdjustment.max')) / 100, mean: Number(data.get('statAdjustment.mean')) / 100,
+    probability: Number(data.get('statAdjustment.probability')) / 100,
+  };
   for (const key of SHOCK_KEYS) {
     for (const [bound] of distributionColumns) {
       config.simulation.distributions[key][bound] = Number(data.get(`shock.${key}.${bound}`)) / 100;

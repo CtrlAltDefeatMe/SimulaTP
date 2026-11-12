@@ -162,7 +162,8 @@ export function upgradeConfig(config, started) {
   }
   if (!started && upgraded.simulation) {
     const { marketVariation, serviceCostVariation, statAdjustment } = DEFAULT_SIMULATION
-    upgraded.simulation = { marketVariation: { ...marketVariation }, serviceCostVariation, statAdjustment: { ...statAdjustment }, ...upgraded.simulation }
+    upgraded.simulation = { marketVariation: { ...marketVariation }, serviceCostVariation, ...upgraded.simulation }
+    upgraded.simulation.statAdjustment = { ...statAdjustment, ...upgraded.simulation.statAdjustment }
   }
   return upgraded
 }
@@ -1375,7 +1376,7 @@ export function explainYear(config, { budget, actual }) {
     // The true-up changes revenue for a service provider and cost of sales for a distributor.
     const beforeTrueUp = (gaap.profit + (service ? -entry.amount : entry.amount)) / (service ? gaap.costs : gaap.revenue)
     const drivers = []
-    const facts = { statRate: entry.statRate }
+    const facts = { statRate: entry.statRate, statAdjustment: entry.statAdjustment }
     if (service) {
       const budgetFees = total(budget, month => month.services[id].fee)
       const budgetCost = total(budget, month => month.services[id].cost)
