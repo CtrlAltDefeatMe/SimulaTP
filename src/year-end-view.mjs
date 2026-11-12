@@ -54,6 +54,11 @@ function stat(label, value, detail) {
   return `<div class="panel kpi"><p class="kpi-label">${html(label)}</p><strong class="kpi-number">${html(value)}</strong><p class="kpi-footer">${html(detail)}</p></div>`;
 }
 
+function signedPercent(value) {
+  if (!value) return percent.format(0);
+  return `${value > 0 ? '+' : '−'}${percent.format(Math.abs(value))}`;
+}
+
 function scorecard({ yearEnd, entityResults, fullYear, budget, priceRevisions }) {
   const policies = new Map(entityResults.filter(row => row.policy).map(row => [row.id, row.policy]));
   const within = yearEnd.filter(entry => entry.statusAfter === 'within').length;
@@ -67,15 +72,16 @@ function scorecard({ yearEnd, entityResults, fullYear, budget, priceRevisions })
     <div class="panel pricing-period">
       <div><p class="pricing-period-label">December close</p><h2 id="year-end-review-heading">Year-end review</h2></div>
       <div class="pricing-period-copy"><p>${within === yearEnd.length
-        ? 'Every distributor finished the year inside its arm’s-length range.'
-        : `${yearEnd.length - within} of ${yearEnd.length} distributors finished outside their arm’s-length range. A year-end adjustment can still move them.`}</p></div>
+        ? 'Every tested entity finished the year inside its arm’s-length range on local statutory results.'
+        : `${yearEnd.length - within} of ${yearEnd.length} tested entities finished outside their arm’s-length range on local statutory results. A year-end adjustment can still move them.`}</p>
+        <p><button class="button" type="button" data-action="year-summary">Explain the year</button></p></div>
     </div>
     <div class="kpi-grid year-end-stats">
-      ${stat('Distributors within range', `${within} of ${yearEnd.length}`, 'After year-end adjustments')}
+      ${stat('Tested entities within range', `${within} of ${yearEnd.length}`, 'Local statutory results, after year-end adjustments')}
       ${stat('Tax at risk', wholeDollars.format(exposure), 'Assumed adjustment to target with no relief')}
-      ${stat('Price reviews used', `${priceRevisions} of 3`, 'Quarterly reviews where prices changed')}
-      ${stat('Year-end adjustments', wholeDollars.format(moved), `${adjusted.length} of ${yearEnd.length} distributors`)}
-      ${stat('Group income tax', wholeDollars.format(fullYear.tax.total), `${percent.format(fullYear.tax.effectiveRate)} effective rate · budget ${percent.format(budget.tax.effectiveRate)}`)}
+      ${stat('Price reviews used', `${priceRevisions} of 3`, 'Quarterly reviews where prices or fees changed')}
+      ${stat('Year-end adjustments', wholeDollars.format(moved), `${adjusted.length} of ${yearEnd.length} tested entities`)}
+      ${stat('Group income tax', wholeDollars.format(fullYear.tax.total), `${percent.format(fullYear.tax.effectiveRate)} effective rate on local results · budget ${percent.format(budget.tax.effectiveRate)}`)}
       ${stat('Customs duty', wholeDollars.format(fullYear.customs.total), `${wholeDollars.format(adjustmentDuty)} on year-end adjustments`)}
       ${stat('Consolidated operating profit', wholeDollars.format(consolidated.operatingProfit), `${profitGap < 0 ? '−' : '+'}${wholeDollars.format(Math.abs(profitGap))} vs budget`)}
       ${stat('Consolidated operating margin', percent.format(consolidated.operatingMargin), `Budget ${percent.format(budget.operatingMargin)}`)}
@@ -94,23 +100,24 @@ function adjustmentForm({ yearEnd, message }) {
   return `<form id="year-end-form" class="pricing-form">
     <section class="panel" aria-labelledby="year-end-adjust-heading">
       <div class="panel-header"><div><h2 id="year-end-adjust-heading">Year-end adjustments</h2>
-        <p class="subtitle" id="year-end-help">A positive amount is paid by the distributor to its supplier. A negative amount is a credit from the supplier. Adjustments are booked in December and do not change consolidated profit.</p></div></div>
+        <p class="subtitle" id="year-end-help">The range is tested on the local statutory (stat) result: US GAAP with the stat adjustment revealed at the December close. A positive stat adjustment is extra local cost. For a distributor, a positive amount is paid to its supplier and a negative amount is a credit from it. For Poland and India, a positive amount is an extra fee from their customers and a negative amount is a refund. Adjustments are booked in December and do not change consolidated profit.</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="year-end-adjust-heading"><table class="year-end-table">
         <thead><tr>
-          <th scope="col">Distributor</th><th scope="col">Supplier</th><th scope="col">Margin before</th><th scope="col">Range</th>
-          <th scope="col">Result before</th><th scope="col">Adjustment</th><th scope="col">Margin after</th><th scope="col">Result after</th>
+          <th scope="col">Entity</th><th scope="col">Counterparty</th><th scope="col">US GAAP result</th><th scope="col">Stat adjustment</th>
+          <th scope="col">Stat result</th><th scope="col">Range</th>
+          <th scope="col">Year-end adjustment</th><th scope="col">Stat result after</th>
         </tr></thead>
         <tbody>${yearEnd.map(entry => `<tr>
-          <th scope="row" class="table-name">${html(entityName(entry.id))}</th>
-          <td>${html(entityName(entry.supplier))}</td>
-          <td>${percent.format(entry.marginBefore)}</td>
+          <th scope="row" class="table-name">${html(entityName(entry.id))}<small class="pricing-margin-target">${entry.service ? 'Markup on cost' : 'Operating margin'}</small></th>
+          <td>${html(entry.counterparty.map(entityName).join(', '))}</td>
+          <td>${percent.format(entry.gaapBefore)}</td>
+          <td>${signedPercent(entry.statRate)}<small class="pricing-margin-target">${signedDollars(entry.statAdjustment)}</small></td>
+          <td>${percent.format(entry.marginBefore)}${statusChip(entry.statusBefore)}</td>
           <td>${rangeLabel(entry)}<small class="pricing-margin-target">Target ${percent.format(entry.target)}</small></td>
-          <td>${statusChip(entry.statusBefore)}</td>
           <td><select name="yearEnd.${html(entry.id)}" aria-label="Year-end adjustment for ${html(entityName(entry.id))}" aria-describedby="year-end-help">
             ${['none', 'range', 'target'].map(mode => option(entry, mode)).join('')}
           </select></td>
-          <td>${percent.format(entry.marginAfter)}</td>
-          <td>${statusChip(entry.statusAfter)}</td>
+          <td>${percent.format(entry.marginAfter)}${statusChip(entry.statusAfter)}</td>
         </tr>`).join('')}</tbody>
       </table></div>
     </section>

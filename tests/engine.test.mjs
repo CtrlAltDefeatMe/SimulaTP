@@ -2,15 +2,18 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyGoodsPrices, applyYearEndAdjustments, createConfig, productLineResults, profitAllocation, reviewGoodsPricing, royaltyCheck,
-  runYear, summarizeTaxAndCustoms, upgradeConfig,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, explainYear, productLineResults, profitAllocation,
+  reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig,
 } from '../src/engine.mjs'
-import { DEFAULT_SIMULATION, simulateShocks } from '../src/simulation.mjs'
+import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
 
 const cents = value => Math.round(value * 100) / 100
 const total = (months, key) => months.reduce((sum, month) => sum + month.consolidated[key], 0)
 const distributors = ['DE', 'FR', 'UK', 'APAC', 'CA']
-const policyRows = review => Object.fromEntries(review.entityResults.filter(row => distributors.includes(row.id)).map(row => [row.id, row.policy]))
+const policyRows = review => Object.fromEntries(review.entityResults.filter(row => TESTED_PARTIES.includes(row.id)).map(row => [row.id, row.policy]))
+const bp = value => Math.round(value * 10_000)
+const serviceMarkup = (months, id) => months.reduce((sum, month) => sum + month.services[id].fee, 0) /
+  months.reduce((sum, month) => sum + month.services[id].cost, 0) - 1
 
 // A scenario as saved before R&D, market variation and the tax layers were added,
 // when the game was called SimulaTP and that name was its default seed.
@@ -157,9 +160,9 @@ test('a distributor is flagged only when its forecast leaves the range', () => {
     assert.equal(policy.outOfPolicy, !inside, id)
     assert.equal(policy.exposure > 0, !inside, id)
   }
-  // In the default year France finishes below its range and Germany stays inside.
+  // In the default year France finishes below its range.
   assert.equal(policies.FR.status, 'below')
-  assert.equal(policies.DE.status, 'within')
+  assert.ok(Object.values(policies).some(policy => policy.status === 'within'))
 })
 
 test('a range must contain its target', () => {
@@ -175,9 +178,9 @@ test('year-end adjustments to target move each distributor onto its target and l
   const after = runYear(adjusted)
   assert.equal(cents(after.actual[11].consolidated.operatingProfit), cents(before.actual[11].consolidated.operatingProfit))
   const policies = policyRows(reviewGoodsPricing(adjusted, 12))
-  for (const [id, policy] of Object.entries(policies)) {
-    assert.equal(Math.round(policy.forecast * 10_000), Math.round(policy.target * 10_000), id)
-    assert.equal(policy.status, 'within', id)
+  for (const id of distributors) {
+    assert.equal(Math.round(policies[id].forecast * 10_000), Math.round(policies[id].target * 10_000), id)
+    assert.equal(policies[id].status, 'within', id)
   }
   const entries = after.actual[11].transactions.filter(transaction => transaction.policy === 'YEAR_END_ADJUSTMENT')
   assert.equal(entries.length, 5)
@@ -197,7 +200,7 @@ test('year-end adjustments to the range touch only distributors outside it', () 
   const config = createConfig()
   const adjusted = applyYearEndAdjustments(config, 12, Object.fromEntries(distributors.map(id => [id, 'range'])))
   const review = reviewGoodsPricing(adjusted, 12)
-  const outside = review.yearEnd.filter(entry => entry.statusBefore !== 'within')
+  const outside = review.yearEnd.filter(entry => distributors.includes(entry.id) && entry.statusBefore !== 'within')
   assert.ok(outside.length > 0 && outside.length < distributors.length)
   assert.deepEqual(review.yearEnd.filter(entry => entry.amount !== 0).map(entry => entry.id), outside.map(entry => entry.id))
   for (const entry of outside) {
@@ -214,13 +217,20 @@ test('year-end adjustments stay closed until December is revealed', () => {
   assert.equal(applyYearEndAdjustments(config, 12, { DE: 'none' }), config)
 })
 
-test('income tax is each entity\'s rate applied to its operating profit', () => {
+test('income tax follows US GAAP profit during the year and local statutory profit once the year is closed', () => {
   const config = createConfig()
   const { actual } = runYear(config)
+  const gaapProfit = (id, months) => months.reduce((profit, month) => profit + month.entities[id].operatingProfit, 0)
+  const nineMonths = actual.slice(0, 9)
+  const interim = summarizeTaxAndCustoms(config, nineMonths).tax
+  const expectedInterim = Object.keys(config.tax.rates).reduce((sum, id) => sum + config.tax.rates[id] * gaapProfit(id, nineMonths), 0)
+  assert.ok(Math.abs(interim.total - expectedInterim) < 0.005)
   const { tax } = summarizeTaxAndCustoms(config, actual)
+  const stat = actual[11].stat
   const expected = Object.keys(config.tax.rates).reduce((sum, id) =>
-    sum + config.tax.rates[id] * actual.reduce((profit, month) => profit + month.entities[id].operatingProfit, 0), 0)
+    sum + config.tax.rates[id] * (stat[id]?.operatingProfit ?? gaapProfit(id, actual)), 0)
   assert.ok(Math.abs(tax.total - expected) < 0.005)
+  assert.equal(stat.US, undefined)
   assert.ok(tax.effectiveRate > 0.15 && tax.effectiveRate < 0.30)
 })
 
@@ -273,4 +283,138 @@ test('a royalty above the break-even rate projects a loss for the Swiss licensee
   const justBelow = withRoyalty(Math.floor(base.breakEvenRate * 1000) / 1000)
   assert.equal(justBelow.licenseeLoss, false)
   assert.equal(reviewGoodsPricing({ ...config, policies: { ...config.policies, royaltyRate: 0.45 } }, 0).allocation.licenseeLoss, true)
+})
+
+test('Poland and India charge a fixed monthly fee set from budgeted cost plus the policy markup', () => {
+  const config = createConfig()
+  const { budget, actual, variance } = runYear(config)
+  for (const id of ['PL', 'IN']) {
+    const fees = new Set([...budget, ...actual].map(month => month.services[id].fee))
+    assert.equal(fees.size, 1, id)
+    // The budget year lands on the policy markup to within the rounding of the fee to cents.
+    const target = id === 'PL' ? config.policies.polandMarkup : config.policies.indiaServicesMarkup
+    assert.ok(Math.abs(serviceMarkup(budget, id) - target) < 1e-6, id)
+    // Actual costs move, the fee does not, so the actual markup drifts.
+    assert.ok(Math.abs(serviceMarkup(actual, id) - target) > 0.001, id)
+  }
+  // Poland's cost per unit falls as output rises, because part of its cost is fixed.
+  const unitCost = month => month.services.PL.cost / month.services.PL.units
+  const byVolume = [...budget].sort((left, right) => left.services.PL.units - right.services.PL.units)
+  assert.ok(unitCost(byVolume[0]) > unitCost(byVolume.at(-1)))
+  assert.ok(variance.every(month => Math.abs(month.check) < 0.005))
+})
+
+test('with no fixed overhead Poland\'s budget cost per unit is its standard conversion cost', () => {
+  const config = { ...createConfig(), services: { polandFixedShare: 0 } }
+  delete config.annualOperatingMargin
+  const { budget } = runYear(config)
+  for (const month of budget) {
+    const standard = Object.entries(month.capacity.PL.byProduct).reduce((sum, [family, units]) => sum + units * { A: 13, B: 11, C: 43 }[family], 0)
+    assert.ok(Math.abs(month.services.PL.cost - standard) < 1e-6)
+  }
+})
+
+test('the year reconciles when Poland converts nothing', () => {
+  const config = { ...createConfig(), capacity: { US: 2550, PL: 0 } }
+  delete config.annualOperatingMargin
+  const { actual } = runYear(config)
+  assert.ok(actual.every(month => month.services.PL.units === 0 && month.services.PL.cost > 0))
+  assert.ok(actual.every(month => Math.abs(month.reconciliation.profitDifference) < 0.005))
+})
+
+test('a service fee set at a quarterly review applies from the next month and its policy quote reaches the target', () => {
+  const config = createConfig()
+  const review = reviewGoodsPricing(config, 6)
+  const quotes = Object.fromEntries(review.services.map(quote => [quote.id, quote]))
+  assert.throws(() => applyServiceFees(config, 5, { PL: 50_000 }), /March, June, or September/)
+  assert.throws(() => applyServiceFees(config, 6, { US: 50_000 }), /Unknown service provider/)
+  assert.equal(applyServiceFees(config, 6, { PL: quotes.PL.fee }), config)
+  const revised = applyServiceFees(config, 6, { PL: quotes.PL.recommended, IN: quotes.IN.recommended })
+  const { actual } = runYear(revised)
+  assert.equal(actual[5].services.PL.fee, quotes.PL.fee)
+  assert.equal(actual[6].services.PL.fee, quotes.PL.recommended)
+  assert.equal(actual[11].services.IN.fee, quotes.IN.recommended)
+  const forecast = policyRows(reviewGoodsPricing(revised, 6))
+  assert.equal(bp(forecast.PL.forecast), bp(config.policies.polandMarkup))
+  assert.equal(bp(forecast.IN.forecast), bp(config.policies.indiaServicesMarkup))
+  assert.equal(reviewGoodsPricing(revised, 9).priceRevisions, 1)
+})
+
+test('the local statutory adjustment is a signed share of operating expenses within its limits', () => {
+  const ids = Array.from({ length: 4000 }, (_, index) => 'entity' + index)
+  const rates = Object.values(simulateStatAdjustments(DEFAULT_SIMULATION, ids))
+  const sizes = rates.map(Math.abs)
+  assert.ok(Math.max(...sizes) <= 0.10 && Math.min(...sizes) >= 0)
+  const average = sizes.reduce((sum, size) => sum + size, 0) / sizes.length
+  assert.ok(Math.abs(average - 0.03) < 0.002)
+  const raising = rates.filter(rate => rate > 0).length / rates.length
+  assert.ok(raising > 0.45 && raising < 0.55)
+  assert.deepEqual(simulateStatAdjustments(DEFAULT_SIMULATION, ['DE', 'FR']), simulateStatAdjustments(DEFAULT_SIMULATION, ['DE', 'FR']))
+  const off = simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: { max: 0, mean: 0 } }, ['DE'])
+  assert.equal(off.DE, 0)
+  assert.throws(() => simulateStatAdjustments({ ...DEFAULT_SIMULATION, statAdjustment: { max: 0.05, mean: 0.06 } }, ['DE']), /statutory adjustment/)
+})
+
+test('the range is tested on US GAAP during the year and on local statutory results after December', () => {
+  const config = createConfig()
+  const interim = reviewGoodsPricing(config, 9)
+  assert.equal(interim.stat, null)
+  assert.ok(Object.values(policyRows(interim)).every(policy => policy.basis === 'gaap'))
+  const review = reviewGoodsPricing(config, 12)
+  const { actual } = runYear(config)
+  for (const [id, policy] of Object.entries(policyRows(review))) {
+    const stat = review.stat[id]
+    const result = review.entityResults.find(row => row.id === id).fullYear
+    assert.equal(policy.basis, 'stat', id)
+    // The adjustment is the entity's rate applied to its operating expenses outside R&D and goods.
+    assert.ok(Math.abs(stat.adjustment - stat.rate * result.otherOperatingExpenses) < 1e-6, id)
+    const profit = result.revenue - result.rdServiceRevenue - result.cogs - result.otherOperatingExpenses - stat.adjustment
+    const base = ['PL', 'IN'].includes(id) ? result.otherOperatingExpenses + stat.adjustment : result.revenue - result.rdServiceRevenue
+    assert.ok(Math.abs(policy.forecast - profit / base) < 1e-9, id)
+    assert.notEqual(bp(policy.forecast), bp(policy.gaap), id)
+  }
+  // The adjustment sits outside the US GAAP ledger, so the consolidated result is untouched.
+  assert.ok(Math.abs(actual[11].reconciliation.profitDifference) < 0.005)
+  const off = createConfig()
+  off.simulation.statAdjustment = { max: 0, mean: 0 }
+  for (const policy of Object.values(policyRows(reviewGoodsPricing(off, 12)))) assert.equal(bp(policy.forecast), bp(policy.gaap))
+})
+
+test('year-end adjustments to target bring every tested party onto its target in local statutory terms', () => {
+  const config = createConfig()
+  const before = runYear(config)
+  const adjusted = applyYearEndAdjustments(config, 12, Object.fromEntries(TESTED_PARTIES.map(id => [id, 'target'])))
+  const after = runYear(adjusted)
+  assert.equal(cents(after.actual[11].consolidated.operatingProfit), cents(before.actual[11].consolidated.operatingProfit))
+  assert.ok(Math.abs(after.actual[11].reconciliation.profitDifference) < 0.005)
+  for (const [id, policy] of Object.entries(policyRows(reviewGoodsPricing(adjusted, 12)))) {
+    assert.equal(bp(policy.forecast), bp(policy.target), id)
+    assert.equal(policy.status, 'within', id)
+    assert.equal(policy.exposure, 0, id)
+  }
+  const trueUps = after.actual[11].transactions.filter(transaction => transaction.policy === 'SERVICE_TRUE_UP')
+  assert.deepEqual([...new Set(trueUps.map(entry => entry.from))].sort(), ['IN', 'PL'])
+})
+
+test('the explanation of the year adds up from the budget to the final statutory result', () => {
+  const config = createConfig()
+  assert.throws(() => explainYear(config, { budget: [], actual: [] }), /December/)
+  for (const scenario of [config, applyYearEndAdjustments(config, 12, { DE: 'target', PL: 'range' })]) {
+    const year = runYear(scenario)
+    const explanations = explainYear(scenario, year)
+    assert.deepEqual(explanations.map(entry => entry.id), TESTED_PARTIES)
+    const rows = policyRows(reviewGoodsPricing(scenario, 12))
+    for (const entry of explanations) {
+      const moved = entry.drivers.reduce((sum, driver) => sum + driver.points, 0)
+      assert.ok(Math.abs(entry.budget + moved - entry.result) < 0.0005, entry.id)
+      assert.equal(bp(entry.result), bp(rows[entry.id].forecast), entry.id)
+      assert.equal(entry.status, rows[entry.id].status, entry.id)
+      // The US GAAP result reported beside the statutory one is the one after any true-up.
+      assert.equal(bp(entry.gaap), bp(rows[entry.id].gaap), entry.id)
+      assert.equal(bp(year.actual[11].yearEnd.find(row => row.id === entry.id).gaapAfter), bp(entry.gaap), entry.id)
+    }
+    const germany = explanations.find(entry => entry.id === 'DE')
+    assert.ok(germany.drivers.some(driver => driver.key === 'salesPrice'))
+    assert.equal(germany.drivers.some(driver => driver.key === 'yearEnd'), scenario !== config)
+  }
 })

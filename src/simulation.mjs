@@ -16,6 +16,11 @@ export const DEFAULT_SIMULATION = Object.freeze({
   ]),
   // Half-width of each market's own monthly deviation, added to the group-wide shock.
   marketVariation: Object.freeze({ demand: 0.10, salesPrice: 0.05 }),
+  // Half-width of the monthly deviation in each service provider's own costs.
+  serviceCostVariation: 0.08,
+  // The year's US GAAP to local statutory adjustment, as a share of operating expenses:
+  // its largest size and its average size. The direction is random.
+  statAdjustment: Object.freeze({ max: 0.10, mean: 0.03 }),
 });
 
 const shockLabels = {
@@ -88,7 +93,19 @@ function prepareConfig(config) {
     }
     return value;
   });
-  return { seed: String(seed), distributions, marketVariation, factor: factorCorrelation(config.correlation) };
+  // Scenarios saved before these settings existed run without them.
+  const serviceCostVariation = config.serviceCostVariation ?? 0;
+  if (!Number.isFinite(serviceCostVariation) || serviceCostVariation < 0 || serviceCostVariation >= 1) {
+    throw new RangeError('Service cost variation must be between 0% and less than 100%.');
+  }
+  const { max = 0, mean = 0 } = config.statAdjustment ?? {};
+  if (![max, mean].every(Number.isFinite) || mean < 0 || max > 1 || mean > max || (max > 0 && mean === 0)) {
+    throw new RangeError('The local statutory adjustment needs an average above 0% and no larger than its maximum, which can be at most 100%. Enter 0% for both to switch it off.');
+  }
+  return {
+    seed: String(seed), distributions, marketVariation, serviceCostVariation, statAdjustment: { max, mean },
+    factor: factorCorrelation(config.correlation),
+  };
 }
 
 /** Throw a RangeError if the seed, triangular distributions, or correlation are invalid. */
@@ -151,16 +168,19 @@ function triangularQuantile(probability, { min, mode, max }) {
  * Generate monthly fractional shocks. The correlation applies to the underlying normal draws.
  * When `markets` are given, each month also carries `markets[id]`: that market's own
  * deviation in demand and sales price, to be added to the group-wide shock.
+ * When `services` are given, each month carries `services[id]`: that service
+ * provider's own cost deviation.
  */
-export function simulateShocks(config = DEFAULT_SIMULATION, months = 12, markets = []) {
+export function simulateShocks(config = DEFAULT_SIMULATION, months = 12, markets = [], services = []) {
   if (!Number.isSafeInteger(months) || months <= 0) {
     throw new RangeError('Months must be a positive integer.');
   }
-  const { seed, distributions, marketVariation, factor } = prepareConfig(config);
+  const { seed, distributions, marketVariation, serviceCostVariation, factor } = prepareConfig(config);
   const normal = createNormalSampler(createUniformSampler(seed));
-  // A separate stream keeps the group-wide draws identical for a given seed,
-  // whatever the market list or variation settings.
+  // Separate streams keep the group-wide draws identical for a given seed,
+  // whatever the market and service lists or variation settings.
   const marketUniform = createUniformSampler(seed + '/markets');
+  const serviceUniform = createUniformSampler(seed + '/services');
   const unit = { min: -1, mode: 0, max: 1 };
   return Array.from({ length: months }, () => {
     const independent = SHOCK_KEYS.map(() => normal());
@@ -175,6 +195,29 @@ export function simulateShocks(config = DEFAULT_SIMULATION, months = 12, markets
         ])),
       ]));
     }
+    if (services.length) {
+      shock.services = Object.fromEntries(services.map((id) => [
+        id, serviceCostVariation * triangularQuantile(serviceUniform(), unit),
+      ]));
+    }
     return shock;
   });
+}
+
+/**
+ * Draw the year's US GAAP to local statutory adjustment for each entity, as a signed
+ * share of its operating expenses. A positive rate adds cost in the local accounts.
+ * The size follows a Beta(1, b) distribution scaled to the maximum, which puts most
+ * adjustments near zero and has exactly the configured average. The sign is a coin toss.
+ */
+export function simulateStatAdjustments(config = DEFAULT_SIMULATION, entities = []) {
+  const { seed, statAdjustment: { max, mean } } = prepareConfig(config);
+  const uniform = createUniformSampler(seed + '/stat');
+  return Object.fromEntries(entities.map((id) => {
+    const size = uniform();
+    const side = uniform();
+    if (!max) return [id, 0];
+    const magnitude = max * (1 - (1 - size) ** (mean / (max - mean)));
+    return [id, side < 0.5 ? -magnitude : magnitude];
+  }));
 }

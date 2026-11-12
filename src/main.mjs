@@ -1,12 +1,13 @@
 import {
-  applyGoodsPrices, applyYearEndAdjustments, createConfig, CUSTOMS_ROUTES, ENTITIES, MAX_ROYALTY_RATE, POLICY_LABELS, PRODUCTS,
-  productLineResults, profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms,
-  TAXED_ENTITIES, upgradeConfig,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_ROUTES, ENTITIES, explainYear, MAX_ROYALTY_RATE,
+  POLICY_LABELS, PRODUCTS, productLineResults, profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear,
+  summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
 } from './engine.mjs';
 import { renderBrief } from './brief-view.mjs';
 import { landPolygons } from './land.mjs';
-import { pricingStatus, readGoodsPriceOverrides, renderGoodsPricing, useGoodsPriceQuote } from './pricing-view.mjs';
+import { pricingStatus, readGoodsPriceOverrides, readServiceFees, renderGoodsPricing, useGoodsPriceQuote } from './pricing-view.mjs';
 import { MARKET_SHOCK_KEYS, SHOCK_KEYS } from './simulation.mjs';
+import { renderYearSummary } from './summary-view.mjs';
 import { licenseeLossWarning, readYearEndChoices, royaltyWarning } from './year-end-view.mjs';
 
 const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -17,6 +18,10 @@ const legacyStorageKey = 'simulatp-2027-v1';
 const pageHeader = document.querySelector('#page-header');
 const pageBody = document.querySelector('#page-body');
 const announcement = document.querySelector('#announcement');
+const summaryDialog = document.querySelector('#year-summary');
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+// How long each month stays on screen while the year runs on its own.
+const RUN_STEP_MS = 320;
 const navButtons = [...document.querySelectorAll('[data-view]')];
 const formatAmount = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const formatCompactAmount = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 2 });
@@ -32,7 +37,7 @@ const iconPaths = {
   settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="currentColor"/><circle cx="15" cy="17" r="2.5" fill="currentColor"/>',
   next: '<path d="M5 12h13m-6-6 6 6-6 6"/>',
 };
-const views = { brief: 'Case brief', dashboard: '2027 performance', map: 'Transaction map', pricing: 'Goods transfer prices', settings: 'Scenario settings' };
+const views = { brief: 'Case brief', dashboard: '2027 performance', map: 'Transaction map', pricing: 'Transfer prices', settings: 'Scenario settings' };
 const categoryLabels = { goods: 'Tangible goods', royalty: 'Royalty', services: 'Services' };
 const categoryColors = { goods: '#4e73a0', royalty: '#92612e', services: '#227466' };
 const shockLabels = { demand: 'Demand', salesPrice: 'Sales price', materialCost: 'Material input cost' };
@@ -116,23 +121,33 @@ const state = {
   settingsMessage: '',
   pricingMessage: '',
   yearEndMessage: '',
+  // True while the remaining months are being revealed without a stop.
+  running: false,
 };
+let runTimer = null;
 
 function revealButton() {
   if (state.revealed >= 12) return '<button class="button" disabled>All actuals revealed</button>';
+  if (state.running) return `<button class="button primary" disabled>Running the year · ${months[state.period]}</button>`;
   return `<button class="button primary" type="button" data-action="reveal">Reveal ${months[state.revealed]} actuals ${icon('next')}</button>`;
 }
 
+function runButton() {
+  if (state.revealed >= 12) return '<button class="button" type="button" data-action="year-summary">Explain the year</button>';
+  if (state.running) return '';
+  return `<button class="button" type="button" data-action="run-year" title="Reveal every remaining month without changing transfer prices or fees">${state.revealed ? 'Run the rest of the year' : 'Run the full year'}</button>`;
+}
+
 function renderHeader() {
-  const reviewButton = quarterPricingMonth(state.revealed)
-    ? '<button class="button" type="button" data-action="review-prices">Review transfer prices</button>'
+  const reviewButton = state.running ? ''
+    : quarterPricingMonth(state.revealed) ? '<button class="button" type="button" data-action="review-prices">Review transfer prices</button>'
     : state.revealed === 12 ? '<button class="button primary" type="button" data-action="review-prices">Year-end review</button>' : '';
   pageHeader.innerHTML = `
     <div>
       <p class="breadcrumb">Simulation <span aria-hidden="true">/</span> FY 2027</p>
       <h1 id="page-title" tabindex="-1">${views[state.view]}</h1>
     </div>
-    ${state.view === 'dashboard' ? `<div class="view-controls">${reviewButton}${revealButton()}</div>` : ''}`;
+    ${state.view === 'dashboard' ? `<div class="view-controls">${reviewButton}${runButton()}${revealButton()}</div>` : ''}`;
   document.title = `PlayTP · ${views[state.view]}`;
 }
 
@@ -292,6 +307,70 @@ function entityPanel(budget, actual) {
         </tr>`).join('')}
       </tbody>
     </table></div>
+    <p class="field-note panel-note">All monthly figures are US GAAP. ${state.revealed === 12
+      ? 'The arm’s-length ranges are tested on the local statutory results shown below.'
+      : 'Local statutory results, which the arm’s-length ranges are tested on, are published with the December close.'}</p>
+  </section>`;
+}
+
+const serviceRoles = { PL: 'Toll manufacturing for Switzerland', IN: 'Shared services for the United States and Switzerland' };
+
+// The fee is fixed for the month and the cost is not, so the markup moves every month.
+function servicePanel(budget, actual) {
+  const month = actual ?? budget;
+  const { policies, ranges = createConfig().ranges } = state.config;
+  const policy = { PL: [policies.polandMarkup, ranges.toll], IN: [policies.indiaServicesMarkup, ranges.services] };
+  const row = (id) => {
+    const { cost, fee } = month.services[id];
+    const planned = budget.services[id].cost;
+    const [target, range] = policy[id];
+    const units = id === 'PL'
+      ? ` · ${amount(month.capacity.PL.used, formatNumber)} units converted${actual ? `, budget ${amount(budget.capacity.PL.used, formatNumber)}` : ''}` : '';
+    return `<tr>
+      <th scope="row" class="table-name">${html(labelFor(id))}<small class="pricing-margin-target">${serviceRoles[id]}${units}</small></th>
+      <td>${amount(cost)}${actual ? `<small class="pricing-margin-target ${varianceClass(planned - cost)}">${signed(cost - planned)} vs budget</small>` : ''}</td>
+      <td>${amount(planned)}</td>
+      <td>${amount(fee)}</td>
+      <td>${amount(cost ? fee / cost - 1 : 0, formatPercent)}</td>
+      <td>${amount(target, formatPercent)}<small class="pricing-margin-target">Range ${amount(range.low, formatPercent)}–${amount(range.high, formatPercent)}, full year</small></td>
+    </tr>`;
+  };
+  return `<section class="panel" aria-labelledby="service-heading">
+    <div class="panel-header"><div><h2 id="service-heading">Service fees and costs</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD · a fixed monthly fee against a cost that moves</p></div></div>
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="service-heading"><table class="service-table">
+      <thead><tr><th scope="col">Service provider</th><th scope="col">Cost</th><th scope="col">Budget cost</th><th scope="col">Fixed fee</th><th scope="col">Markup on cost</th><th scope="col">Policy markup</th></tr></thead>
+      <tbody>${row('PL')}${row('IN')}</tbody>
+    </table></div>
+    <p class="field-note panel-note">Each fee is budgeted annual cost plus the policy markup, divided by twelve. Part of Poland’s cost is fixed overhead. In a slow month its cost falls by less than its output and the fee does not fall at all, so its markup rises. A busy month does the reverse.</p>
+  </section>`;
+}
+
+const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range' };
+
+// Local accounts for the year. They exist only once December is closed.
+function statPanel() {
+  const { stat, yearEnd } = state.year.actual[11];
+  if (state.revealed < 12 || !stat) return '';
+  const tested = new Map(yearEnd.map(entry => [entry.id, entry]));
+  return `<section class="panel" aria-labelledby="stat-heading">
+    <div class="panel-header"><div><h2 id="stat-heading">Local statutory results</h2><p class="subtitle">Full year 2027 · USD · operating profit on US GAAP and in the local statutory (stat) accounts</p></div></div>
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="stat-heading"><table class="stat-table">
+      <thead><tr><th scope="col">Entity</th><th scope="col">US GAAP profit</th><th scope="col">Operating expenses</th>
+        <th scope="col">Stat adjustment</th><th scope="col">Local stat profit</th><th scope="col">Tested result</th><th scope="col">Range</th><th scope="col">Result</th></tr></thead>
+      <tbody>${Object.entries(stat).map(([id, row]) => {
+        const entry = tested.get(id);
+        return `<tr class="${entry && entry.statusAfter !== 'within' ? 'pricing-out-of-policy' : ''}">
+          <th scope="row" class="table-name">${html(labelFor(id))}</th>
+          <td>${amount(row.gaapProfit)}</td><td>${amount(row.base)}</td>
+          <td>${row.adjustment ? signed(row.adjustment) : amount(0)}<small class="pricing-margin-target">${row.rate ? signed(row.rate, formatPercent) : amount(0, formatPercent)} of expenses</small></td>
+          <td>${amount(row.operatingProfit)}</td>
+          <td>${entry ? `${amount(entry.marginAfter, formatPercent)}<small class="pricing-margin-target">${entry.service ? 'Markup on cost' : 'Operating margin'} · US GAAP ${amount(entry.gaapAfter, formatPercent)}</small>` : '—'}</td>
+          <td>${entry ? `${amount(entry.low, formatPercent)}–${amount(entry.high, formatPercent)}` : '—'}</td>
+          <td>${entry ? `<span class="status-chip ${entry.statusAfter === 'within' ? 'ok' : 'miss'}">${statusLabels[entry.statusAfter]}</span>` : '—'}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>
+    <p class="field-note panel-note">A positive stat adjustment is extra cost in the local accounts, which lowers local profit. The rate is applied to operating expenses outside R&amp;D and goods purchased. Local income tax for the year is charged on these results.</p>
   </section>`;
 }
 
@@ -384,6 +463,8 @@ function renderDashboard() {
     ${kpis(budget.consolidated, actual?.consolidated)}
     ${chart()}
     ${entityPanel(budget, actual)}
+    ${statPanel()}
+    ${servicePanel(budget, actual)}
     ${productLinePanel(budget, actual)}
     ${taxPanel(budget, actual)}
     <div class="dashboard-detail">${variancePanel(bridge)}${controlPanels(budget, actual)}</div>
@@ -658,10 +739,10 @@ function renderMap() {
 const policyFields = [
   ['lrdMargin', 'European LRD target operating margin'],
   ['ffdMargin', 'Asian and Canadian FFD target operating margin'],
-  ['polandMarkup', 'Poland toll cost-plus markup'],
+  ['polandMarkup', 'Poland toll markup on budgeted cost'],
   ['belgiumMargin', 'Belgium warehouse target operating margin'],
   ['usServicesMarkup', 'US headquarters services markup'],
-  ['indiaServicesMarkup', 'India shared services markup'],
+  ['indiaServicesMarkup', 'India shared services markup on budgeted cost'],
   ['royaltyRate', 'Swiss royalty to US, share of covered sales', MAX_ROYALTY_RATE * 100],
   ['usToSwissMarkup', 'US → Swiss cross-supply markup'],
   ['swissToUsMarkup', 'Swiss → US cross-supply markup'],
@@ -670,6 +751,8 @@ const policyFields = [
 const rangeFields = [
   ['lrd', 'low', 'European LRD range, low'], ['lrd', 'high', 'European LRD range, high'],
   ['ffd', 'low', 'Asian and Canadian FFD range, low'], ['ffd', 'high', 'Asian and Canadian FFD range, high'],
+  ['toll', 'low', 'Poland toll markup range, low'], ['toll', 'high', 'Poland toll markup range, high'],
+  ['services', 'low', 'India services markup range, low'], ['services', 'high', 'India services markup range, high'],
 ];
 const marketVariationLabels = { demand: 'Demand variation by market (±%)', salesPrice: 'Sales price variation by market (±%)' };
 const correlationPairs = [[0, 1], [0, 2], [1, 2]];
@@ -705,9 +788,12 @@ function renderSettings() {
   const defaults = createConfig();
   const {
     simulation, capacity, policies, annualOperatingMargin, rd = defaults.rd, ranges = defaults.ranges,
-    tax = defaults.tax, customs = defaults.customs, priceFloor = defaults.priceFloor,
+    tax = defaults.tax, customs = defaults.customs, priceFloor = defaults.priceFloor, services = defaults.services,
   } = state.config;
   const marketVariation = simulation.marketVariation ?? { demand: 0, salesPrice: 0 };
+  // A scenario saved before these settings existed runs without them.
+  const serviceCostVariation = simulation.serviceCostVariation ?? 0;
+  const statAdjustment = simulation.statAdjustment ?? { max: 0, mean: 0 };
   const royalty = royaltyCheck(state.config);
   // Applying a scenario starts a new year, so the budget is the projection that matters here.
   const licensee = profitAllocation(state.year.budget);
@@ -745,6 +831,8 @@ function renderSettings() {
                 ${MARKET_SHOCK_KEYS.map((key) => `<label class="field">${marketVariationLabels[key]}${numberInput(`marketVariation.${key}`, percentInput(marketVariation[key]), { min: 0, max: 100 })}</label>`).join('')}
               </div>
               <p class="field-note">The shocks above move every market together. Each market’s demand and sales price also move by up to this much on their own each month. Enter 0 to keep all markets in step.</p>
+              <label class="field">Service cost variation in Poland and India (±%)${numberInput('serviceCostVariation', percentInput(serviceCostVariation), { min: 0, max: 99 })}</label>
+              <p class="field-note">Each service provider’s own cost moves by up to this much each month, on top of the effect of volume.</p>
               <label class="field">Simulation seed<input name="seed" value="${html(simulation.seed)}" maxlength="100" required></label>
             </div>
           </section>
@@ -784,13 +872,30 @@ function renderSettings() {
               <p class="field-note">Standard cost is budget materials and conversion, plus the Polish toll fee on goods the Swiss principal sells. While the rule is on, starting prices, policy prices, prices you enter and year-end credits cannot take a price below the floor.</p>
             </div>
           </section>
+          <section class="panel" aria-labelledby="service-settings-heading">
+            <div class="panel-header"><div><h2 id="service-settings-heading">Service fees</h2><p class="subtitle">Poland and India charge a fixed monthly fee</p></div></div>
+            <div class="form-fields">
+              <label class="field">Fixed overhead share of Poland’s conversion cost (%)${numberInput('services.polandFixedShare', percentInput(services.polandFixedShare), { min: 0, max: 100 })}</label>
+              <p class="field-note">Each fee is the provider’s budgeted annual cost plus its policy markup, divided by twelve. The fixed share is measured at normal volume and does not fall when Poland converts fewer units. Enter 0 for a fully variable cost.</p>
+            </div>
+          </section>
+          <section class="panel" aria-labelledby="stat-settings-heading">
+            <div class="panel-header"><div><h2 id="stat-settings-heading">US GAAP to local statutory adjustment</h2><p class="subtitle">Revealed at the December close · share of each local entity’s operating expenses</p></div></div>
+            <div class="form-fields">
+              <div class="field-pair">
+                <label class="field">Largest adjustment (%)${numberInput('statAdjustment.max', percentInput(statAdjustment.max), { min: 0, max: 100 })}</label>
+                <label class="field">Average adjustment (%)${numberInput('statAdjustment.mean', percentInput(statAdjustment.mean), { min: 0, max: 100 })}</label>
+              </div>
+              <p class="field-note">Each entity outside the United States draws its own adjustment for the year. It can add or remove local cost. The arm’s-length ranges and local income tax are tested on the adjusted results. Enter 0 for both to keep local results equal to US GAAP.</p>
+            </div>
+          </section>
           <section class="panel" aria-labelledby="ranges-heading">
-            <div class="panel-header"><div><h2 id="ranges-heading">Arm’s-length ranges</h2><p class="subtitle">Full-year operating margins, as percentages</p></div></div>
+            <div class="panel-header"><div><h2 id="ranges-heading">Arm’s-length ranges</h2><p class="subtitle">Full-year operating margins for distributors and markups on cost for Poland and India, as percentages</p></div></div>
             <div class="form-fields">
               <div class="field-pair">
                 ${rangeFields.map(([kind, bound, label]) => `<label class="field">${label}${numberInput(`range.${kind}.${bound}`, percentInput(ranges[kind][bound]), { min: 0, max: 100 })}</label>`).join('')}
               </div>
-              <p class="field-note">A distributor is flagged only when its full-year margin leaves its range. Each range must contain the target margin above.</p>
+              <p class="field-note">A tested entity is flagged only when its full-year result leaves its range. Each range must contain the target above.</p>
             </div>
           </section>
           <section class="panel breakdown" aria-labelledby="royalty-heading">
@@ -807,7 +912,7 @@ function renderSettings() {
           <div class="rate-fields">
             ${CUSTOMS_ROUTES.map((route) => `<label class="field">${html(customsRouteLabel(route))} duty${numberInput(`duty.${route.key}`, percentInput(customs.rates[route.key]), { min: 0, max: 99 })}</label>`).join('')}
           </div>
-          <p class="field-note">Income tax is each entity’s rate applied to its operating profit. Duty is charged on the declared transfer price of goods that cross a customs border and is reported as a memo. It is not deducted from operating profit.</p>
+          <p class="field-note">Income tax is each entity’s rate applied to its operating profit, and to its local statutory profit once the year is closed. Duty is charged on the declared transfer price of goods that cross a customs border and is reported as a memo. It is not deducted from operating profit.</p>
         </div>
       </section>
       <div id="scenario-message" aria-live="polite">${state.settingsMessage ? `<p class="form-message">${html(state.settingsMessage)}</p>` : ''}</div>
@@ -836,6 +941,9 @@ function readSettings(form) {
   for (const id of TAXED_ENTITIES) config.tax.rates[id] = Number(data.get(`tax.${id}`)) / 100;
   for (const { key } of CUSTOMS_ROUTES) config.customs.rates[key] = Number(data.get(`duty.${key}`)) / 100;
   config.priceFloor = { enabled: data.get('priceFloor.enabled') === 'on', markup: Number(data.get('priceFloor.markup')) / 100 };
+  config.services.polandFixedShare = Number(data.get('services.polandFixedShare')) / 100;
+  config.simulation.serviceCostVariation = Number(data.get('serviceCostVariation')) / 100;
+  config.simulation.statAdjustment = { max: Number(data.get('statAdjustment.max')) / 100, mean: Number(data.get('statAdjustment.mean')) / 100 };
   for (const key of SHOCK_KEYS) {
     for (const [bound] of distributionColumns) {
       config.simulation.distributions[key][bound] = Number(data.get(`shock.${key}.${bound}`)) / 100;
@@ -849,8 +957,83 @@ function readSettings(form) {
   return config;
 }
 
+function stopRun() {
+  clearTimeout(runTimer);
+  runTimer = null;
+  state.running = false;
+}
+
+function revealNext() {
+  state.period = state.revealed;
+  state.revealed += 1;
+  state.mapBasis = 'actual';
+  state.pricingMessage = '';
+  state.yearEndMessage = '';
+}
+
+/** Open the pop-up that explains where each tested entity finished the year, and why. */
+function openYearSummary() {
+  if (state.revealed !== 12 || !summaryDialog) return;
+  const { config } = state;
+  const explanations = explainYear(config, state.year);
+  summaryDialog.innerHTML = renderYearSummary({
+    explanations,
+    untouched: !(config.goodsPriceSchedule?.length || config.serviceFeeSchedule?.length),
+    adjusted: explanations.some(entry => entry.adjustment),
+  });
+  if (!summaryDialog.open) summaryDialog.showModal();
+  summaryDialog.querySelector('.summary-body').scrollTop = 0;
+  summaryDialog.querySelector('#year-summary-title').focus();
+}
+
+/** Reveal every remaining month at the prices and fees now in force, then explain the year. */
+function runFullYear() {
+  if (state.running || state.revealed >= 12) return;
+  state.running = true;
+  const step = () => {
+    revealNext();
+    // Without motion the year closes in one step.
+    while (reducedMotion.matches && state.revealed < 12) revealNext();
+    if (state.revealed < 12) {
+      if (state.view === 'dashboard') render();
+      runTimer = setTimeout(step, RUN_STEP_MS);
+      return;
+    }
+    stopRun();
+    storeState();
+    render();
+    announcement.textContent = 'December actuals revealed. The year is closed.';
+    openYearSummary();
+  };
+  step();
+}
+
+/** Start the same year again from January, with prices, fees and year-end choices back at their start. */
+function replayYear() {
+  stopRun();
+  const config = { ...state.config, goodsPriceSchedule: [], serviceFeeSchedule: [], yearEnd: createConfig().yearEnd };
+  state.config = config;
+  state.year = runYear(config);
+  state.revealed = 0;
+  state.period = 0;
+  state.mapBasis = 'budget';
+  state.settingsMessage = '';
+  state.pricingMessage = '';
+  state.yearEndMessage = '';
+  storeState();
+  if (summaryDialog?.open) summaryDialog.close();
+  announcement.textContent = 'The same year is ready to replay from January.';
+  if (state.view === 'dashboard') render();
+  else {
+    location.hash = 'dashboard';
+    setView('dashboard');
+  }
+  document.querySelector('#page-title').focus();
+}
+
 function applyScenario(config, message) {
   const year = runYear(config);
+  stopRun();
   state.config = config;
   state.year = year;
   state.revealed = 0;
@@ -879,6 +1062,7 @@ function render() {
     }), { revenue: 0, operatingProfit: 0 });
     pageBody.innerHTML = renderGoodsPricing({
       ...review, revealed: state.revealed, message: state.pricingMessage, yearEndMessage: state.yearEndMessage,
+      serviceBudget: state.year.budget.map(month => month.services),
       budget: { ...budget, operatingMargin: budget.operatingProfit / budget.revenue, ...summarizeTaxAndCustoms(state.config, state.year.budget) },
     });
   }
@@ -927,15 +1111,29 @@ document.addEventListener('click', (event) => {
     return;
   }
   const { action, period, metric, filter, mapEntity } = button.dataset;
+  if (action === 'run-year') {
+    runFullYear();
+    return;
+  }
+  if (action === 'year-summary') {
+    openYearSummary();
+    return;
+  }
+  if (action === 'close-summary') {
+    summaryDialog.close();
+    return;
+  }
+  if (action === 'replay-year') {
+    replayYear();
+    return;
+  }
+  if (state.running && (action === 'reveal' || period !== undefined)) return;
   if (action === 'reveal' && state.revealed < 12) {
-    state.period = state.revealed;
-    state.revealed += 1;
-    state.mapBasis = 'actual';
-    state.pricingMessage = '';
-    state.yearEndMessage = '';
+    revealNext();
     storeState();
     announcement.textContent = `${months[state.period]} actuals revealed.`;
   } else if (action === 'review-prices' || action === 'start') {
+    if (summaryDialog?.open) summaryDialog.close();
     const view = action === 'start' ? 'dashboard' : 'pricing';
     location.hash = view;
     setView(view, { focus: true });
@@ -971,6 +1169,16 @@ document.addEventListener('click', (event) => {
     if (state.revealed === 12) month?.focus({ preventScroll: true });
   }
   focusAfterRender(button);
+  // Closing December by hand ends the year the same way the automatic run does.
+  if (action === 'reveal' && state.revealed === 12) openYearSummary();
+});
+
+// A click on the backdrop closes the pop-up. Escape closes it without any help.
+summaryDialog?.addEventListener('click', (event) => {
+  if (event.target === summaryDialog) summaryDialog.close();
+});
+summaryDialog?.addEventListener('close', () => {
+  (document.querySelector('[data-action="year-summary"]') ?? document.querySelector('#page-title'))?.focus({ preventScroll: true });
 });
 
 pageBody.addEventListener('change', (event) => {
@@ -1020,16 +1228,17 @@ pageBody.addEventListener('submit', (event) => {
   if (form.id === 'goods-pricing-form') {
     event.preventDefault();
     try {
-      const config = applyGoodsPrices(state.config, state.revealed, readGoodsPriceOverrides(form));
+      const priced = applyGoodsPrices(state.config, state.revealed, readGoodsPriceOverrides(form));
+      const config = applyServiceFees(priced, state.revealed, readServiceFees(form));
       if (config !== state.config) {
         const year = runYear(config);
         reviewGoodsPricing(config, state.revealed);
         state.year = year;
         state.config = config;
-        state.pricingMessage = `Transfer prices applied starting in ${months[state.revealed]}. The forecast has been updated.`;
+        state.pricingMessage = `New prices and fees apply from ${months[state.revealed]}. The forecast has been updated.`;
         storeState();
       } else {
-        state.pricingMessage = 'The current transfer prices are still in effect.';
+        state.pricingMessage = 'The current transfer prices and fees are still in effect.';
       }
       render();
       document.querySelector('#goods-pricing-form button[type="submit"]').focus({ preventScroll: true });
