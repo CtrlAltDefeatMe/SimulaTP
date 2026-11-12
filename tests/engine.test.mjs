@@ -84,24 +84,80 @@ test('customs duty follows the importing block, where the goods were made and th
   assert.ok(actual.every(month => month.inventory.every(bin => bin.closing.every(lot => lot.origin === 'US' || lot.origin === 'EU'))))
 })
 
-test('one duty rate moves only its own lane and product line', () => {
+test('duty is part of what imported goods cost and reaches cost of sales when they are sold', () => {
+  // Leave the margin target out so that unit costs are not rescaled between the two runs.
   const config = createConfig()
-  const base = summarizeTaxAndCustoms(config, runYear(config).actual).customs
+  delete config.annualOperatingMargin
   const raised = structuredClone(config)
-  raised.customs.rates['APAC.US'].B += 0.07
-  const after = summarizeTaxAndCustoms(raised, runYear(raised).actual).customs
-  for (const { key } of CUSTOMS_LANES) {
-    for (const family of Object.keys(PRODUCTS)) {
-      const change = after.lanes[key].products[family].duty - base.lanes[key].products[family].duty
-      if (key === 'APAC.US' && family === 'B') assert.ok(Math.abs(change - 0.07 * base.lanes[key].products[family].value) < 0.005)
-      else assert.equal(change, 0, key + ' ' + family)
-    }
-  }
-  // Duty is a memo. It does not change operating profit.
-  assert.equal(total(runYear(raised).actual, 'operatingProfit'), total(runYear(config).actual, 'operatingProfit'))
+  for (const family of Object.keys(PRODUCTS)) raised.customs.rates['EU.US'][family] += 0.04
+  const [low, high] = [config, raised].map(scenario => runYear(scenario).actual)
+  const year = (months, pick) => months.reduce((sum, month) => sum + pick(month), 0)
+  const stockAt = (months, key, owner) => months[11].inventory.filter(bin => !owner || bin.owner === owner)
+    .reduce((sum, bin) => sum + bin.closing.reduce((value, lot) => value + lot.quantity * lot[key], 0), 0)
+  const moreDuty = year(high, month => month.customs.total) - year(low, month => month.customs.total)
+  assert.ok(moreDuty > 1000)
+  // Switzerland imports the US-made goods. The extra duty sits in its stock until the goods
+  // are sold, so its profit falls by the duty less what is still on the shelf.
+  const stillInStock = stockAt(high, 'unitValue', 'CH') - stockAt(low, 'unitValue', 'CH')
+  assert.ok(stillInStock > 0 && stillInStock < moreDuty)
+  const profit = (months, id) => year(months, month => month.entities[id].operatingProfit)
+  // Goods sold on to Asia carry the duty in the distributor's declared price base only through
+  // Switzerland's cost, so the whole effect lands on the importer.
+  assert.ok(Math.abs(profit(high, 'CH') - profit(low, 'CH') + moreDuty - stillInStock) < 0.01)
+  for (const id of ['US', 'PL', 'BE', 'DE', 'FR', 'UK', 'APAC', 'CA', 'IN']) assert.ok(Math.abs(profit(high, id) - profit(low, id)) < 1e-6, id)
+  // The group bears it too: duty is paid to customs, not to another group company.
+  const groupStock = stockAt(high, 'unitGroupCost') - stockAt(low, 'unitGroupCost')
+  assert.ok(Math.abs(total(high, 'operatingProfit') - total(low, 'operatingProfit') + moreDuty - groupStock) < 0.01)
+  assert.ok(high.every(month => Object.values(month.reconciliation).every(value => Math.abs(value) < 0.005)))
   const invalid = structuredClone(config)
   invalid.customs.rates['CA.EU'].C = 1.2
   assert.throws(() => runYear(invalid), /customs duty rate/)
+})
+
+test('an upward year-end adjustment into another customs block carries duty and still lands on target', () => {
+  // Find a year in which Asia finishes above its target, so that it owes its supplier more.
+  let found = null
+  for (let index = 0; index < 60 && !found; index++) {
+    const config = createConfig()
+    config.simulation.seed = 'duty-' + index
+    const entry = runYear(config).actual[11].yearEnd.find(row => row.id === 'APAC')
+    if (entry.toTarget > 1000) found = config
+  }
+  assert.ok(found)
+  const before = runYear(found)
+  const after = runYear(applyYearEndAdjustments(found, 12, { APAC: 'target' }))
+  const entry = after.actual[11].yearEnd.find(row => row.id === 'APAC')
+  assert.ok(entry.amount > 0 && entry.dutyRate > 0)
+  assert.ok(Math.abs(entry.duty - entry.dutyRate * entry.amount) < 1e-9)
+  assert.equal(bp(entry.marginAfter), bp(entry.target))
+  assert.ok(Math.abs(after.actual[11].customs.adjustments.APAC.duty - entry.duty) < 1e-9)
+  // Asia pays the adjustment and the duty. Switzerland receives the adjustment. The group loses the duty.
+  const profit = (year, id) => year.actual[11].entities[id].operatingProfit
+  assert.ok(Math.abs(profit(after, 'APAC') - profit(before, 'APAC') + entry.amount + entry.duty) < 0.005)
+  assert.ok(Math.abs(profit(after, 'CH') - profit(before, 'CH') - entry.amount) < 0.005)
+  assert.ok(Math.abs(after.actual[11].consolidated.operatingProfit - before.actual[11].consolidated.operatingProfit + entry.duty) < 0.005)
+  assert.ok(Object.values(after.actual[11].reconciliation).every(value => Math.abs(value) < 0.005))
+  // The explanation of the year still adds up.
+  const explained = explainYear(applyYearEndAdjustments(found, 12, { APAC: 'target' }), after).find(row => row.id === 'APAC')
+  assert.ok(Math.abs(explained.budget + explained.drivers.reduce((sum, driver) => sum + driver.points, 0) - explained.result) < 1e-4)
+})
+
+test('a distributor\'s policy price leaves room for the duty it pays on top', () => {
+  const margins = [0, 0.05, 0.15].map((rate) => {
+    const config = createConfig()
+    for (const origin of ['US', 'EU']) for (const family of Object.keys(PRODUCTS)) config.customs.rates['APAC.' + origin][family] = rate
+    const { budget } = runYear(config)
+    const asia = budget.reduce((sum, month) => ({ revenue: sum.revenue + month.entities.APAC.revenue, profit: sum.profit + month.entities.APAC.operatingProfit }), { revenue: 0, profit: 0 })
+    // The whole budget still meets the consolidated target, with unit costs rescaled around the duty.
+    assert.ok(Math.abs(total(budget, 'operatingProfit') / total(budget, 'revenue') - config.annualOperatingMargin) < 1e-9)
+    const prices = reviewGoodsPricing(config, 0).routes.find(route => route.key === 'CH-APAC').prices
+    return { margin: asia.profit / asia.revenue, price: prices.find(price => price.product === 'B').applied, rate }
+  })
+  // Asia earns its target margin in the budget at any duty rate.
+  for (const { margin, rate } of margins) assert.ok(Math.abs(margin - 0.075) < 0.0005, String(rate))
+  // Its price falls as duty rises, so that the landed cost stays about the same.
+  assert.ok(margins[0].price > margins[1].price && margins[1].price > margins[2].price)
+  assert.ok(Math.abs(margins[1].price * 1.05 / margins[0].price - 1) < 0.01)
 })
 
 test('duty rates saved by goods route become rates by block, origin and product line', () => {
@@ -287,12 +343,13 @@ test('a range must contain its target', () => {
   assert.throws(() => runYear(config), /range/)
 })
 
-test('year-end adjustments to target move each distributor onto its target and leave the group unchanged', () => {
+test('year-end adjustments to target move each distributor onto its target and cost the group only the duty they attract', () => {
   const config = createConfig()
   const before = runYear(config)
   const adjusted = applyYearEndAdjustments(config, 12, Object.fromEntries(distributors.map(id => [id, 'target'])))
   const after = runYear(adjusted)
-  assert.equal(cents(after.actual[11].consolidated.operatingProfit), cents(before.actual[11].consolidated.operatingProfit))
+  assert.equal(cents(after.actual[11].consolidated.operatingProfit),
+    cents(before.actual[11].consolidated.operatingProfit - after.actual[11].customs.adjustmentDuty))
   const policies = policyRows(reviewGoodsPricing(adjusted, 12))
   for (const id of distributors) {
     assert.equal(Math.round(policies[id].forecast * 10_000), Math.round(policies[id].target * 10_000), id)

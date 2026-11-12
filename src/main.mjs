@@ -399,7 +399,7 @@ const productFamilies = Object.keys(PRODUCTS);
 function customsPanel(customs, basis) {
   const cell = ({ rate, value, duty }) => `<td>${amount(duty)}<small class="pricing-margin-target">${formatPercent.format(rate)} of ${amount(value)}</small></td>`;
   return `<section class="panel" aria-labelledby="customs-heading">
-    <div class="panel-header"><div><h2 id="customs-heading">Customs duty</h2><p class="subtitle">${basis} · duty on the declared transfer price of goods entering a customs block</p></div></div>
+    <div class="panel-header"><div><h2 id="customs-heading">Customs duty</h2><p class="subtitle">${basis} · duty charged on the declared transfer price of goods entering a customs block</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="customs-heading"><table class="customs-table">
       <thead><tr><th scope="col">Imports into</th><th scope="col">Goods made in</th>
         ${productFamilies.map(family => `<th scope="col">${html(PRODUCTS[family].name)}</th>`).join('')}<th scope="col">Duty</th></tr></thead>
@@ -415,7 +415,7 @@ function customsPanel(customs, basis) {
         <tr class="total-row"><th scope="row" class="table-name">All imports</th><td colspan="${productFamilies.length + 1}"></td><td>${amount(customs.total)}</td></tr>
       </tbody>
     </table></div>
-    <p class="field-note panel-note">Memo. Duty is not deducted from operating profit. Europe is one customs block: the EU, Switzerland and the United Kingdom. Goods that move inside a block, or return to the block that made them, pay no duty.</p>
+    <p class="field-note panel-note">The importer adds the duty to the cost of the goods, so it reaches cost of sales when they are sold. Europe is one customs block: the EU, Switzerland and the United Kingdom. Goods that move inside a block, or return to the block that made them, pay no duty.</p>
   </section>`;
 }
 
@@ -935,7 +935,7 @@ function renderSettings() {
             })}</td>`).join('')}
           </tr>`).join('')}</tbody>
         </table></div>
-        <p class="field-note panel-note">Europe is one customs block: the EU, Switzerland and the United Kingdom. Goods that move inside a block, or return to the block that made them, pay no duty. Duty is charged each time goods enter a block, on their declared transfer price. It is reported as a memo and is not deducted from operating profit. Canada is supplied from the US plant, so no Europe-made goods reach it in this supply chain and that row has no effect.</p>
+        <p class="field-note panel-note">Europe is one customs block: the EU, Switzerland and the United Kingdom. Goods that move inside a block, or return to the block that made them, pay no duty. Duty is charged each time goods enter a block, on their declared transfer price. The importer adds it to the cost of the goods, so it reaches cost of sales when they are sold, and policy prices to distributors in another block are set net of it. The consolidated target margin above is held when these rates change: unit costs are rescaled around the duty. Canada is supplied from the US plant, so no Europe-made goods reach it in this supply chain and that row has no effect.</p>
       </section>
       <div id="scenario-message" aria-live="polite">${state.settingsMessage ? `<p class="form-message">${html(state.settingsMessage)}</p>` : ''}</div>
       <div class="panel form-footer">

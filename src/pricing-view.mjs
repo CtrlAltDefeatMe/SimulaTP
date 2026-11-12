@@ -76,9 +76,9 @@ function costMarkup(price) {
 }
 
 function pricingTable(routes, editing, priceFloor) {
-  const rule = priceFloor
+  const rule = `${priceFloor
     ? `Price floor: standard cost plus ${compactPercent.format(priceFloor.markup)}. No price can go below it.`
-    : 'No price floor is set. A price can go below standard cost.';
+    : 'No price floor is set. A price can go below standard cost.'} Import duty is paid by the buyer on top of the price and becomes part of its cost of sales.`;
   return `<section class="panel" aria-labelledby="goods-pricing-table-heading">
     <div class="panel-header"><div><h2 id="goods-pricing-table-heading">Goods prices by channel</h2><p class="subtitle">USD per unit · ${rule}</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="goods-pricing-table-heading">
@@ -95,7 +95,7 @@ function pricingTable(routes, editing, priceFloor) {
             </th><td class="pricing-policy" rowspan="${route.prices.length}">${html(shortPolicy(route))}</td>` : ''}
             <th scope="row" class="pricing-family">${html(productName(price.product))}</th>
             <td>${format(price.standardCost)}${Number.isFinite(price.floor) ? `<small class="pricing-margin-target">Floor ${format(price.floor)}</small>` : ''}</td>
-            <td>${format(price.applied)}</td>
+            <td>${format(price.applied)}${price.duty ? `<small class="pricing-margin-target">+ ${markupPercent.format(price.duty)} import duty</small>` : ''}</td>
             <td>${costMarkup(price)}</td>
             <td>${editing ? policyPriceButton(route, price) : format(price.recommended)}</td>
             <td class="pricing-edit">${editing ? priceInput(route, price) : '—'}</td>
@@ -231,7 +231,7 @@ function openingInventoryPanel(routes, openingPriceMethod) {
     <div class="panel-header"><h2 id="pricing-assumptions-heading">January opening inventory and starting prices</h2></div>
     <div class="pricing-assumptions-copy">
       <p>The model assumes each distributor opens January 1 with two months of base demand per product family, one month per lot. FIFO issues the November 2026 lot first, at 97% of the historical reference transfer price. The December 2026 lot carries 100% of that reference price.</p>
-      <p>The historical reference price equals the distributor’s base net resale price less operating expenses and the historical operating margin. The assumptions are ${compactPercent.format(DISTRIBUTOR_COST_RATE.lrd)} for expenses and 3% for margin at LRDs, and ${compactPercent.format(DISTRIBUTOR_COST_RATE.ffd)} for expenses and 7.5% for margin at FFDs. Both percentages are applied to the base net resale price.</p>
+      <p>The historical reference price equals the distributor’s base net resale price less operating expenses and the historical operating margin. The assumptions are ${compactPercent.format(DISTRIBUTOR_COST_RATE.lrd)} for expenses and 3% for margin at LRDs, and ${compactPercent.format(DISTRIBUTOR_COST_RATE.ffd)} for expenses and 7.5% for margin at FFDs. Both percentages are applied to the base net resale price. Where a distributor imports from another customs block, that reference is its landed cost: the transfer price plus the duty it pays on top.</p>
       <p>During the year each distributor orders enough to hold about two months of base demand. A new transfer price applies to new shipments only, and the older stock is sold first. A price change therefore reaches a distributor’s cost of sales about two months after it takes effect.</p>
       <p>When a scenario starts, the model sets transfer prices for new shipments to target each distributor’s full-year budget margin, using the FIFO costs and quantities expected to enter cost of sales. January’s margin can differ from the annual target because it reflects the cost of the opening lots sold that month.</p>
       ${openingPriceMethod === 'legacy' ? '<p class="pricing-assumptions-note">This in-progress scenario started with the prior pricing method. The FIFO-based starting prices apply to new or reset scenarios.</p>' : ''}
