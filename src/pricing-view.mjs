@@ -53,7 +53,62 @@ function policyPriceButton(route, price) {
   if (!Number.isFinite(price.recommended)) return '—';
   const display = dollars.format(price.recommended);
   const label = `Use policy price ${display} for ${productName(price.product)}, ${entityName(route.from)} to ${entityName(route.to)}`;
-  return `<button class="pricing-quote" type="button" aria-label="${html(label)}" data-goods-price-quote="${price.recommended.toFixed(2)}">${display}</button>`;
+  const belowCost = Number.isFinite(price.standardCost) && price.recommended < price.standardCost;
+  return `<button class="pricing-quote" type="button" aria-label="${html(label)}${belowCost ? ', below standard cost' : ''}" data-goods-price-quote="${price.recommended.toFixed(2)}">${display}</button>${belowCost ? '<small class="pricing-margin-target negative">Below cost</small>' : ''}`;
+}
+
+const isBelowCost = price => Number.isFinite(price.standardCost) && price.applied < price.standardCost;
+const listOf = items => items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+
+// Says which prices sit below the supplier's cost, or are held at the floor, and what follows from it.
+function pricingAlerts(routes, entityResults, priceFloor) {
+  const policies = new Map(entityResults.filter(row => row.policy).map(row => [row.id, row.policy]));
+  const below = routes.flatMap(route => route.prices.filter(isBelowCost).map(price => ({ route, price })));
+  const held = routes.filter(route => route.floorHeld?.length);
+  let panels = '';
+  if (below.length) {
+    panels += `<section class="panel pricing-alert" aria-labelledby="below-cost-heading">
+      <div class="panel-header"><div><h2 id="below-cost-heading">Sold below cost</h2><p class="subtitle">${below.length} goods ${below.length === 1 ? 'price is' : 'prices are'} below the supplier’s standard cost</p></div></div>
+      <div class="pricing-alert-copy">
+        <ul>${below.map(({ route, price }) => `<li><strong>${html(productName(price.product))}, ${html(entityName(route.from))} to ${html(entityName(route.to))}.</strong> ${format(price.applied)} against a standard cost of ${format(price.standardCost)}, ${markupPercent.format(1 - price.applied / price.standardCost)} below.</li>`).join('')}</ul>
+        <p>The policy price is what the distributor can pay after its own expenses, its target margin and any import duty. On a thin-margin line that can be less than the goods cost to make, so the supplier loses money on every unit before its own expenses. You can accept that, raise the price and let the distributor fall short of its range, or set a price floor in <a href="#settings">Scenario settings</a>.</p>
+      </div>
+    </section>`;
+  }
+  if (held.length && priceFloor) {
+    const item = (route) => {
+      const free = route.policyWithoutFloor;
+      const priced = family => route.prices.find(price => price.product === family);
+      const policyOf = family => Number.isFinite(free?.[family]) ? free[family] : null;
+      // A line the floor lifts above its policy price, and a line priced under its policy price to make up for that.
+      const raised = route.floorHeld.filter(family => policyOf(family) !== null && policyOf(family) < priced(family).applied);
+      const lowered = route.prices.map(price => price.product).filter(family => policyOf(family) !== null && priced(family).applied < policyOf(family));
+      const other = route.floorHeld.filter(family => !raised.includes(family) && !lowered.includes(family));
+      const moved = family => `${productName(family)} to ${format(priced(family).applied)} from ${format(policyOf(family))}${route.floorHeld.includes(family) && lowered.includes(family) ? ' (its own floor)' : ''}`;
+      let text = '';
+      if (raised.length) text += ` The floor lifts ${listOf(raised.map(moved))}.`;
+      if (other.length) text += ` ${listOf(other.map(productName))} ${other.length === 1 ? 'is' : 'are'} held at the floor.`;
+      const policy = policies.get(route.to);
+      if (!route.markup && policy && Number.isFinite(policy.forecast)) {
+        const short = policy.status === 'below' || route.floorShort;
+        if (lowered.length) text += ` ${short ? 'The policy lowers' : `To keep ${entityName(route.to)} at its target, the policy lowers`} ${listOf(lowered.map(moved))}.`;
+        const where = policy.status === 'within'
+          ? short ? 'inside its range but short of its target' : 'inside its range'
+          : `${policy.status} its range of ${percent.format(policy.low)}–${percent.format(policy.high)}`;
+        text += ` ${entityName(route.to)} is forecast at ${percent.format(policy.forecast)}, ${where}.`;
+        if (short) text += ' The floor takes priority over the distributor’s target, so the shortfall stays.';
+      }
+      return `<li><strong>${html(entityName(route.from))} to ${html(entityName(route.to))}.</strong>${html(text)}</li>`;
+    };
+    panels += `<section class="panel pricing-alert pricing-alert-floor" aria-labelledby="floor-alert-heading">
+      <div class="panel-header"><div><h2 id="floor-alert-heading">Price floor in effect</h2><p class="subtitle">No goods price can go below standard cost plus ${compactPercent.format(priceFloor.markup)}, even when that leaves a distributor short of its range</p></div></div>
+      <div class="pricing-alert-copy">
+        <ul>${held.map(item).join('')}</ul>
+        <p>The floor protects the supplier from selling below cost. Where it binds, the distributor pays more than its policy price, and a year-end credit cannot take the year’s purchases below the floor either.</p>
+      </div>
+    </section>`;
+  }
+  return panels;
 }
 
 function shortPolicy(route) {
@@ -72,7 +127,7 @@ function costMarkup(price) {
   if (!Number.isFinite(price.standardCost) || !price.standardCost) return '—';
   const markup = price.applied / price.standardCost - 1;
   const atFloor = Number.isFinite(price.floor) && price.applied <= price.floor;
-  return `<span class="${markup < 0 ? 'negative' : ''}">${markup < 0 ? '−' : ''}${markupPercent.format(Math.abs(markup))}</span>${atFloor ? '<small class="pricing-margin-target">At the floor</small>' : ''}`;
+  return `<span class="${markup < 0 ? 'negative' : ''}">${markup < 0 ? '−' : ''}${markupPercent.format(Math.abs(markup))}</span>${markup < 0 ? '<small class="status-chip miss">Below cost</small>' : ''}${atFloor ? '<small class="pricing-margin-target">At the floor</small>' : ''}`;
 }
 
 function pricingTable(routes, editing, priceFloor) {
@@ -89,7 +144,7 @@ function pricingTable(routes, editing, priceFloor) {
           <th scope="col">Policy price</th><th scope="col">New price</th>
         </tr></thead>
         ${routes.map(route => `<tbody data-pricing-channel="${html(route.key)}">
-          ${route.prices.map((price, index) => `<tr>
+          ${route.prices.map((price, index) => `<tr${isBelowCost(price) ? ' class="pricing-below-cost"' : ''}>
             ${index === 0 ? `<th scope="rowgroup" class="pricing-channel" rowspan="${route.prices.length}">
               ${html(entityName(route.from))} <span aria-hidden="true">→</span><span class="visually-hidden"> to </span> ${html(entityName(route.to))}
             </th><td class="pricing-policy" rowspan="${route.prices.length}">${html(shortPolicy(route))}</td>` : ''}
@@ -173,7 +228,9 @@ function entityResultsPanel(revealed, rows, routes) {
   const columnHeadings = (isForecast = false) => resultColumns.map(([, label], index) =>
     `<th scope="col"${isForecast && index === 0 ? ' class="pricing-forecast-first"' : ''}>${html(label)}</th>`).join('');
   const targets = new Map(routes.map(({ to, targetMargin }) => [to, targetMargin]));
-  const resultCells = (result, policy, isForecast = false) => resultColumns.map(([key, , formatter], index) => {
+  // Distributors whose goods prices are held at the floor.
+  const floored = new Set(routes.filter(route => !route.markup && route.floorHeld?.length).map(route => route.to));
+  const resultCells = (result, policy, isForecast = false, id = null) => resultColumns.map(([key, , formatter], index) => {
     let policyDetails = '';
     if (key === 'operatingMargin' && Number.isFinite(policy?.target)) {
       // One short line each, so the margin column stays narrow.
@@ -196,6 +253,7 @@ function entityResultsPanel(revealed, rows, routes) {
       } else if (policy.status === 'within' && Number.isFinite(policy.low) && Number.isFinite(policy.forecast)) {
         policyDetails += `<small class="pricing-policy-ok">${statusLabels.within}</small>`;
       }
+      if (floored.has(id)) policyDetails += detail('Prices held at the floor');
     }
     const forecastClasses = index === 0 ? 'pricing-forecast-value pricing-forecast-first' : 'pricing-forecast-value';
     return `<td${isForecast ? ` class="${forecastClasses}"` : ''}>${format(result?.[key], formatter)}${policyDetails}</td>`;
@@ -218,7 +276,7 @@ function entityResultsPanel(revealed, rows, routes) {
         const statusClass = comparison.outOfPolicy ? 'pricing-out-of-policy' : '';
         return `<tr class="${[rowClass, statusClass].filter(Boolean).join(' ')}">
           <th scope="row" class="table-name">${html(entityName(id))}</th>
-          ${resultCells(revealed ? ytd : null, showForecast ? undefined : comparison)}${showForecast ? resultCells(fullYear, comparison, true) : ''}
+          ${resultCells(revealed ? ytd : null, showForecast ? undefined : comparison, false, id)}${showForecast ? resultCells(fullYear, comparison, true, id) : ''}
         </tr>`;
       }).join('')}</tbody>
     </table></div>
@@ -255,7 +313,7 @@ export function renderGoodsPricing(review) {
     ? renderYearEnd({ ...review, message: review.yearEndMessage }) : '';
   const results = `${yearEnd}${entityResultsPanel(revealed, entityResults, routes)}${allocationPanel(review)}`;
   const assumptions = openingInventoryPanel(routes, openingPriceMethod);
-  const prices = `${pricingTable(routes, editing, review.priceFloor)}${serviceFeeTable(review.services, review.actual, review.serviceBudget, editing)}`;
+  const prices = `${pricingAlerts(routes, entityResults, review.priceFloor)}${pricingTable(routes, editing, review.priceFloor)}${serviceFeeTable(review.services, review.actual, review.serviceBudget, editing)}`;
   if (!editing) return `${results}${assumptions}
     ${nextReview ? `<section class="panel pricing-period" aria-labelledby="pricing-review-heading">
       <div>

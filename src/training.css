@@ -53,6 +53,12 @@ label.field.field-flag, .field-flag input { color: var(--negative); }
 .panel-note { padding: 0 20px 12px; }
 .rate-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 11px; }
 
+/* Dashboard flag for goods prices below cost or held at the floor */
+.alert-banner { margin: 0; padding: 11px 15px; border: 1px solid #ecc9cc; border-left: 4px solid var(--negative); border-radius: 10px; background: #fffafa; color: var(--text); font-size: 13px; line-height: 1.5; }
+.alert-banner strong { color: var(--negative); }
+.alert-banner-floor { border-color: #ead9b5; border-left-color: #c58a1c; background: #fffcf5; }
+.alert-banner-floor strong { color: #8a5a00; }
+
 /* Customs duty by importing block, origin and product line */
 .customs-table { min-width: 860px; }
 .duty-table { min-width: 720px; }

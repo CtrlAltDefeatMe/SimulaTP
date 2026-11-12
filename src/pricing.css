@@ -72,6 +72,13 @@ ul.pricing-assumptions-note { margin: 0; padding-left: 20px; }
   text-underline-offset: 3px;
 }
 .pricing-quote:hover { text-decoration-style: solid; }
+.pricing-table .pricing-below-cost > td, .pricing-table .pricing-below-cost > .pricing-family { background: #fff6f6; }
+.pricing-table .pricing-below-cost > .pricing-family { color: var(--negative); }
+.pricing-table .status-chip { display: block; width: fit-content; margin: 3px 0 0 auto; }
+.pricing-alert { border-left: 4px solid var(--negative); }
+.pricing-alert-floor { border-left-color: #c58a1c; }
+.pricing-alert-copy { display: grid; gap: 9px; padding: 0 20px 17px; font-size: 13px; line-height: 1.55; }
+.pricing-alert-copy ul { display: grid; gap: 5px; margin: 0; padding-left: 18px; }
 .pricing-table .pricing-route-note td { color: var(--secondary); line-height: 1.45; text-align: left; white-space: normal; }
 
 .price-input {

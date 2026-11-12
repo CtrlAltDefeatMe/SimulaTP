@@ -89,6 +89,15 @@ function scorecard({ yearEnd, entityResults, fullYear, budget, priceRevisions })
   </section>`;
 }
 
+// A credit cannot take the year's purchases below the price floor. Say so where that bites.
+function floorLimit(entry) {
+  if (!entry.floorLimited?.target && !entry.floorLimited?.range) return '';
+  const reach = entry.floorLimited.range
+    ? `so ${entityName(entry.id)} cannot be brought into its range`
+    : `so ${entityName(entry.id)} cannot be brought to its target`;
+  return `<small class="pricing-margin-target negative">The price floor caps a credit at ${dollars.format(Math.abs(entry.toTarget))}, ${html(reach)}</small>`;
+}
+
 function adjustmentForm({ yearEnd, message }) {
   const option = (entry, mode) => {
     const amount = mode === 'target' ? entry.toTarget : mode === 'range' ? entry.toRange : 0;
@@ -118,7 +127,7 @@ function adjustmentForm({ yearEnd, message }) {
           <td>${rangeLabel(entry)}<small class="pricing-margin-target">Target ${percent.format(entry.target)}</small></td>
           <td><select name="yearEnd.${html(entry.id)}" aria-label="Year-end adjustment for ${html(entityName(entry.id))}" aria-describedby="year-end-help">
             ${['none', 'range', 'target'].map(mode => option(entry, mode)).join('')}
-          </select>${entry.dutyRate ? `<small class="pricing-margin-target">${entry.duty ? `Adds ${dollars.format(entry.duty)} customs duty` : `An increase adds ${percent.format(entry.dutyRate)} duty`}</small>` : ''}</td>
+          </select>${entry.dutyRate ? `<small class="pricing-margin-target">${entry.duty ? `Adds ${dollars.format(entry.duty)} customs duty` : `An increase adds ${percent.format(entry.dutyRate)} duty`}</small>` : ''}${floorLimit(entry)}</td>
           <td>${percent.format(entry.marginAfter)}${statusChip(entry.statusAfter)}</td>
         </tr>`).join('')}</tbody>
       </table></div>

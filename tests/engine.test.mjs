@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, explainYear, productLineResults, PRODUCTS, profitAllocation,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation,
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
@@ -284,6 +284,56 @@ test('the price floor holds every goods price at or above standard cost plus the
   }
   assert.equal(budgetMargin('APAC'), 750)
   assert.ok(year.variance.every(month => Math.abs(month.check) < 0.005))
+})
+
+test('prices below the supplier\'s standard cost are reported, and a floor removes them', () => {
+  const open = createConfig()
+  const alerts = goodsPriceAlerts(open, 1)
+  // With no floor the thin line is sold to the full-fledged distributors below cost.
+  assert.deepEqual(alerts.belowCost.map(row => row.key + ' ' + row.product).sort(), ['CH-APAC C', 'US-CA C'])
+  assert.ok(alerts.belowCost.every(row => row.price < row.standardCost))
+  assert.equal(alerts.atFloor.length, 0)
+  assert.equal(alerts.floorMarkup, null)
+  const route = reviewGoodsPricing(open, 0).routes.find(entry => entry.key === 'CH-APAC')
+  assert.deepEqual(route.floorHeld, [])
+  const floored = goodsPriceAlerts(withFloor(), 1)
+  assert.equal(floored.belowCost.length, 0)
+  assert.ok(floored.atFloor.some(row => row.key === 'CH-APAC' && row.product === 'C'))
+  assert.equal(floored.floorMarkup, 0.05)
+})
+
+test('the floor is kept even when it leaves a distributor below its range, and the reason is reported', () => {
+  // A modest floor holds the thin line up and the other lines absorb it, so Asia still meets its target.
+  const modest = reviewGoodsPricing(withFloor(), 0)
+  const asia = modest.routes.find(route => route.key === 'CH-APAC')
+  assert.ok(asia.floorHeld.includes('C') && !asia.floorShort)
+  const price = family => asia.prices.find(entry => entry.product === family)
+  // The floor lifts the thin line above its policy price. The high-margin line is priced under its own to make up for it.
+  assert.ok(asia.policyWithoutFloor.C < price('C').floor && price('C').applied === price('C').floor)
+  assert.ok(price('B').applied < asia.policyWithoutFloor.B && price('B').applied > price('B').floor)
+  assert.equal(policyRows(modest).APAC.status, 'within')
+  // A floor above every policy price leaves nothing to absorb it. The floor still holds.
+  const steep = withFloor(0.6)
+  const review = reviewGoodsPricing(steep, 0)
+  const held = review.routes.find(route => route.key === 'CH-APAC')
+  assert.deepEqual(held.floorHeld, ['A', 'B', 'C'])
+  assert.ok(held.floorShort)
+  assert.ok(held.prices.every(price => price.applied === price.floor))
+  assert.equal(policyRows(review).APAC.status, 'below')
+  const year = runYear(steep)
+  for (const invoice of goodsInvoices(year.actual)) {
+    const floor = review.routes.find(route => route.key === invoice.from + '-' + invoice.to).prices.find(price => price.product === invoice.product).floor
+    assert.ok(invoice.amount / invoice.quantity >= floor - 1e-9, invoice.id)
+  }
+  // Not even a year-end credit can bring Asia into its range, and the explanation says why.
+  const entry = year.actual[11].yearEnd.find(row => row.id === 'APAC')
+  assert.equal(entry.statusBefore, 'below')
+  assert.ok(entry.floorLimited.range && entry.floorLimited.target)
+  const closed = runYear(applyYearEndAdjustments(steep, 12, { APAC: 'target' }))
+  assert.equal(closed.actual[11].yearEnd.find(row => row.id === 'APAC').statusAfter, 'below')
+  const explained = explainYear(steep, year).find(row => row.id === 'APAC')
+  assert.deepEqual(explained.facts.floor, { held: ['A', 'B', 'C'], creditLimited: true })
+  assert.equal(explainYear(createConfig(), runYear(createConfig())).find(row => row.id === 'APAC').facts.floor, undefined)
 })
 
 test('a price entered below the floor is refused', () => {

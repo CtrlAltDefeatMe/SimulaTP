@@ -1162,19 +1162,30 @@ function scenarioBudget(config, months = 0) {
     const floors = priceFloors(config, costs)
     let initial = costScale === 1 ? { ...provisional } : standardGoodsPrices(config, costScale)
     const openingNotes = {}
+    // The policy prices a floor replaces, and whether it puts a distributor's target out of reach.
+    const unfloored = {}
+    const openingShort = {}
     if (calibrateDistributorPrices) {
       for (const route of GOODS_ROUTES.filter(route => !route.markup)) {
         const { key, to } = route
         const margin = policies[LRD.has(to) ? 'lrdMargin' : 'ffdMargin']
         const planned = testedPnl(rollupPnl(reference.map(month => month.entities[to])))
-        const { recommended, note } = distributorQuote(config, route, reference, planned, 1, provisional[key], provisional[key], margin, floors?.[key])
+        const quote = (floor) => distributorQuote(config, route, reference, planned, 1, provisional[key], provisional[key], margin, floor)
+        const { recommended, note, short } = quote(floors?.[key])
         initial[key] = Object.fromEntries(FAMILIES.map(family => [family, recommended?.[family] ?? provisional[key][family]]))
         if (note) openingNotes[key] = note
+        if (floors) {
+          unfloored[key] = quote(null).recommended ?? null
+          openingShort[key] = Boolean(short)
+        }
       }
     }
     initial = atLeastFloor(initial, floors)
     const year = budgetAtCost(config, 12, costScale, initial, initialFees)
-    return { costScale, initial, openingNotes, costs, floors, initialFees, budgetServiceCost, year, gap: consolidatedMargin(year) - target }
+    return {
+      costScale, initial, openingNotes, unfloored, openingShort, costs, floors, initialFees, budgetServiceCost, year,
+      gap: consolidatedMargin(year) - target,
+    }
   }
 
   // Unit costs are scaled until the budget year earns the target margin. Customs duty
@@ -1379,13 +1390,34 @@ function distributorQuote(config, route, forecast, fullYear, startMonth, current
   const note = costAllowance < 0
     ? 'The full-year target is out of reach at any nonnegative price because of costs already incurred or carried in.'
     : floorNote([...held], short)
-  return { recommended, note, held: [...held] }
+  return { recommended, note, held: [...held], short: costAllowance < 0 || short }
+}
+
+/**
+ * Goods prices in force in a month that need the player's attention: those below the
+ * supplier's standard cost, and those held at the price floor.
+ */
+export function goodsPriceAlerts(config, month) {
+  validateConfig(config)
+  validatePricingMonth(month)
+  const { initial, costs, floors } = scenarioBudget(config)
+  const prices = goodsPricesForMonth(config, month, initial)
+  const rows = GOODS_ROUTES.flatMap(({ key, from, to }) => FAMILIES.map(product => ({
+    key, from, to, product, price: prices[key][product], standardCost: costs[key][product], floor: floors?.[key][product] ?? null,
+  })))
+  return {
+    belowCost: rows.filter(row => row.price < row.standardCost),
+    atFloor: rows.filter(row => row.floor !== null && row.price <= row.floor),
+    floorMarkup: floors ? config.priceFloor.markup : null,
+  }
 }
 
 export function reviewGoodsPricing(config, revealed) {
   if (!Number.isInteger(revealed) || revealed < 0 || revealed > 12) throw new RangeError('Reveal progress must be between zero and twelve months.')
   validateConfig(config)
-  const { costScale, initial, openingNotes, openingPriceMethod, costs, floors, initialFees, budgetServiceCost } = scenarioBudget(config)
+  const {
+    costScale, initial, openingNotes, unfloored, openingShort, openingPriceMethod, costs, floors, initialFees, budgetServiceCost,
+  } = scenarioBudget(config)
   const current = goodsPricesForMonth(config, Math.min(revealed + 1, 12), initial)
   const currentFees = serviceFeesForMonth(config, Math.min(revealed + 1, 12), initialFees)
   const effectiveMonth = quarterPricingMonth(revealed)
@@ -1408,15 +1440,27 @@ export function reviewGoodsPricing(config, revealed) {
     const { key, from, to, policy, markup } = route
     const targetMargin = markup ? null : config.policies[LRD.has(to) ? 'lrdMargin' : 'ffdMargin']
     let quote = {}
+    // What the policy would ask for with no floor, where a floor is in force.
+    let withoutFloor = floors && revealed === 0 ? unfloored[key] ?? null : null
+    let floorShort = floors && revealed === 0 ? openingShort[key] ?? false : false
     if (effectiveMonth) {
       const fullYear = entityResults.find(row => row.id === to).fullYear
-      quote = markup ? crossSupplyQuote(route, forecast, config.policies, floors?.[key])
-        : distributorQuote(config, route, forecast, testedPnl(fullYear), effectiveMonth, current[key], initial[key], targetMargin, floors?.[key])
+      const priced = floor => markup ? crossSupplyQuote(route, forecast, config.policies, floor)
+        : distributorQuote(config, route, forecast, testedPnl(fullYear), effectiveMonth, current[key], initial[key], targetMargin, floor)
+      quote = priced(floors?.[key])
+      if (floors) {
+        withoutFloor = priced(null).recommended ?? null
+        floorShort = Boolean(quote.short)
+      }
     }
     const startingQuote = revealed === 0 && openingPriceMethod === 'fifo-policy' && !openingNotes[key] ? initial[key] : null
     return {
       key, from, to, policy, targetMargin, markup: markup ? config.policies[markup] : null, note: quote.note,
       openingNote: openingNotes[key],
+      // Products whose price in force sits at the floor, the policy price the floor replaced,
+      // and whether the floor puts the buyer's full-year target out of reach.
+      floorHeld: floors ? FAMILIES.filter(family => current[key][family] <= floors[key][family]) : [],
+      policyWithoutFloor: withoutFloor, floorShort,
       prices: FAMILIES.map(product => ({
         product, applied: current[key][product], recommended: quote.recommended?.[product] ?? startingQuote?.[product] ?? null,
         standardCost: costs[key][product], floor: floors?.[key][product] ?? null,
@@ -1527,6 +1571,7 @@ function runPeriod(config, months) {
 export function explainYear(config, { budget, actual }) {
   if (actual.length !== 12 || !actual[11].yearEnd) throw new RangeError('The year can be explained once December actuals are revealed.')
   const total = (months, pick) => sum(months.map(pick))
+  const { initial, floors } = scenarioBudget(config)
   return actual[11].yearEnd.map(entry => {
     const { id, service } = entry
     const range = policyRange(config, id)
@@ -1559,6 +1604,16 @@ export function explainYear(config, { budget, actual }) {
       facts.priceDeviation = gaap.revenue / atBudgetPrices - 1
       const units = months => sum(months.flatMap(month => month.sales.filter(sale => sale.seller === id).map(sale => sale.quantity)))
       facts.unitsDeviation = units(actual) / units(budget) - 1
+      if (floors) {
+        // Products whose price sat at the floor at some point in the year, and whether the
+        // floor stops a year-end credit from reaching the range.
+        const key = goodsRouteKey(sourceOf(id), id)
+        const prices = Array.from({ length: 12 }, (_, index) => goodsPricesForMonth(config, index + 1, initial)[key])
+        facts.floor = {
+          held: FAMILIES.filter(family => prices.some(table => table[family] <= floors[key][family])),
+          creditLimited: entry.floorLimited.range,
+        }
+      }
     }
     drivers.push({ key: 'yearEnd', points: gaap.indicator - beforeTrueUp })
     drivers.push({ key: 'stat', points: entry.marginAfter - gaap.indicator })

@@ -1,5 +1,5 @@
 import {
-  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_BLOCKS, CUSTOMS_LANES, ENTITIES, explainYear, GOODS_ORIGINS, MAX_ROYALTY_RATE,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_BLOCKS, CUSTOMS_LANES, ENTITIES, explainYear, goodsPriceAlerts, GOODS_ORIGINS, MAX_ROYALTY_RATE,
   POLICY_LABELS, PRODUCTS, productLineResults, profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear,
   summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
 } from './engine.mjs';
@@ -463,12 +463,28 @@ function controlPanels(budget, actual) {
   </div>`;
 }
 
+// Flags goods prices in force this month that are below the supplier's cost or held at the floor.
+function priceAlertBanner() {
+  const { belowCost, atFloor, floorMarkup } = goodsPriceAlerts(state.config, state.period + 1);
+  const name = ({ product, from, to }) => `${PRODUCTS[product].name}, ${labelFor(from)} to ${labelFor(to)}`;
+  const list = rows => rows.map(name).map(html).join('; ');
+  let banners = '';
+  if (belowCost.length) {
+    banners += `<p class="alert-banner" role="note"><strong>Sold below cost.</strong> In ${months[state.period]}, ${belowCost.length} goods ${belowCost.length === 1 ? 'price is' : 'prices are'} below the supplier’s standard cost: ${list(belowCost)}. <a href="#pricing">See Transfer prices</a> for the amounts and what you can do.</p>`;
+  }
+  if (atFloor.length) {
+    banners += `<p class="alert-banner alert-banner-floor" role="note"><strong>Price floor in effect.</strong> In ${months[state.period]}, ${atFloor.length} goods ${atFloor.length === 1 ? 'price is' : 'prices are'} held at the floor of standard cost plus ${formatPercent.format(floorMarkup)}: ${list(atFloor)}. The floor takes priority over a distributor’s range. <a href="#pricing">See Transfer prices</a> for the effect on margins.</p>`;
+  }
+  return banners;
+}
+
 function renderDashboard() {
   const budget = state.year.budget[state.period];
   const actual = state.period < state.revealed ? state.year.actual[state.period] : null;
   const bridge = actual ? state.year.variance[state.period] : null;
   pageBody.innerHTML = `
     ${monthStrip()}
+    ${priceAlertBanner()}
     ${kpis(budget.consolidated, actual?.consolidated)}
     ${chart()}
     ${entityPanel(budget, actual)}
@@ -878,7 +894,7 @@ function renderSettings() {
             <div class="form-fields">
               <label class="check-field"><input type="checkbox" name="priceFloor.enabled" ${priceFloor.enabled ? 'checked' : ''}> Never price goods below standard cost plus a markup</label>
               <label class="field">Floor markup on standard cost (%)${numberInput('priceFloor.markup', percentInput(priceFloor.markup), { min: 0, max: 100 })}</label>
-              <p class="field-note">Standard cost is budget materials and conversion, plus the Polish toll fee on goods the Swiss principal sells. While the rule is on, starting prices, policy prices, prices you enter and year-end credits cannot take a price below the floor.</p>
+              <p class="field-note">Standard cost is budget materials and conversion, plus the Polish toll fee on goods the Swiss principal sells. While the rule is on, starting prices, policy prices, prices you enter and year-end credits cannot take a price below the floor. The floor takes priority over a distributor’s range: where it binds, the distributor can finish below its range, and the Transfer prices page explains each case. With the rule off, prices below standard cost are allowed and are flagged in red.</p>
             </div>
           </section>
           <section class="panel" aria-labelledby="service-settings-heading">
