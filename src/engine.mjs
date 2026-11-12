@@ -19,15 +19,15 @@ export const ENTITIES = {
 // Modules a thin one. Price levels still differ by market through CHANNEL_FACTOR.
 export const PRODUCTS = {
   A: {
-    name: 'Precision Components', price: 112, material: 31, usConversion: 17, plConversion: 13,
+    name: 'Precision Components', price: 112, material: 40, usConversion: 23, plConversion: 18,
     demand: { US: 640, CH: 170, DE: 360, FR: 285, UK: 310, APAC: 430, CA: 245 },
   },
   B: {
-    name: 'Control Systems', price: 186, material: 28, usConversion: 14, plConversion: 11,
+    name: 'Control Systems', price: 186, material: 44, usConversion: 25, plConversion: 20,
     demand: { US: 430, CH: 110, DE: 240, FR: 200, UK: 185, APAC: 285, CA: 140 },
   },
   C: {
-    name: 'Industrial Modules', price: 268, material: 150, usConversion: 50, plConversion: 43,
+    name: 'Industrial Modules', price: 268, material: 154, usConversion: 52, plConversion: 45,
     demand: { US: 280, CH: 80, DE: 145, FR: 130, UK: 120, APAC: 180, CA: 90 },
   },
 }
@@ -61,7 +61,14 @@ const SERVICE_PROVIDERS = ['PL', 'IN']
 export const TESTED_PARTIES = [...DISTRIBUTORS, ...SERVICE_PROVIDERS]
 // Every entity but the US parent files local accounts that can differ from US GAAP.
 const LOCAL_ENTITIES = ALL_COMPANIES.filter(id => id !== 'US')
-const INDIA_BUDGET_COST = 9800
+// Monthly operating costs outside the distributors, in USD. Belgium also pays for each unit it ships.
+const INDIA_BUDGET_COST = 13_500
+const US_SERVICES_COST = 19_000
+const US_HEADQUARTERS_COST = 34_000
+const SWISS_OPERATING_COST = 27_000
+const BELGIAN_COST = { fixed: 9_500, perUnit: 1.75 }
+// A distributor's own selling and administrative cost, as a share of its sales at list price.
+export const DISTRIBUTOR_COST_RATE = { lrd: 0.15, ffd: 0.22 }
 const INDIA_CUSTOMERS = { US: 0.45, CH: 0.55 }
 const CHANNEL_FACTOR = { US: 1.08, CH: 0.88, DE: 1.04, FR: 1.01, UK: 1.05, APAC: 0.94, CA: 1.02 }
 const SEASONAL = [0.93, 0.95, 0.99, 1.01, 1.04, 1.03, 0.96, 0.98, 1.08, 1.10, 1.13, 1.02]
@@ -69,7 +76,9 @@ const ZERO_SHOCK = { demand: 0, salesPrice: 0, materialCost: 0 }
 const DEFAULT_RD_RATE = 0.04
 // The default budget before R&D, less R&D at its default share of sales. Keeping the
 // target equal to the uncalibrated budget leaves the base unit costs unscaled.
-const DEFAULT_ANNUAL_MARGIN = 3_965_513.159268929 / 10_487_570 - DEFAULT_RD_RATE
+const DEFAULT_ANNUAL_MARGIN = 2_381_070.1859345874 / 10_487_570 - DEFAULT_RD_RATE
+// Defaults of earlier versions, when unit costs and operating expenses were lower.
+const PREVIOUS_DEFAULT_MARGINS = [3_965_513.159268929, 3_980_550.8704, 4_017_544.4704].map(profit => profit / 10_487_570 - DEFAULT_RD_RATE)
 const RD_MARKUP = 0.10
 // Arm's-length ranges for the tested distributors. Each range must contain its target.
 const DEFAULT_RANGES = {
@@ -159,6 +168,11 @@ export function upgradeConfig(config, started) {
     if (Number.isFinite(target) && (target < low || target > high)) {
       upgraded.ranges = { ...upgraded.ranges, [kind]: { low: Math.min(low, target), high: Math.max(high, target) } }
     }
+  }
+  // A scenario that has not started and still holds an earlier default takes the current one.
+  if (!started && upgraded.rd.salesRate === DEFAULT_RD_RATE
+    && PREVIOUS_DEFAULT_MARGINS.some(previous => Math.abs(upgraded.annualOperatingMargin - previous) < 1e-9)) {
+    upgraded.annualOperatingMargin = DEFAULT_ANNUAL_MARGIN
   }
   if (!started && upgraded.simulation) {
     const { marketVariation, serviceCostVariation, statAdjustment } = DEFAULT_SIMULATION
@@ -365,7 +379,7 @@ function basePrice(product, market) {
 }
 
 function distributorCostRate(market) {
-  return LRD.has(market) ? 0.13 : 0.19
+  return LRD.has(market) ? DISTRIBUTOR_COST_RATE.lrd : DISTRIBUTOR_COST_RATE.ffd
 }
 
 function distributorUnitTp(product, market, policies) {
@@ -688,12 +702,12 @@ function sellGoods(stock, book, plans, shocks) {
 function bookOtherCosts(book, stock, sales, config, shocks, indiaFee) {
   const { policies } = config
   const warehouseUnits = sum(stock.snapshot().filter(bin => bin.owner === 'CH' && bin.custodian === 'BE').map(bin => unitsOf(bin.issues)))
-  const belgianCost = 6800 + 1.25 * warehouseUnits
-  const usServices = 14800 * (1 + 0.2 * shocks.demand)
+  const belgianCost = BELGIAN_COST.fixed + BELGIAN_COST.perUnit * warehouseUnits
+  const usServices = US_SERVICES_COST * (1 + 0.2 * shocks.demand)
   // India's cost follows activity and has a deviation of its own. Its fee is fixed for the month.
   const indiaServices = INDIA_BUDGET_COST * (1 + 0.2 * shocks.demand) * (1 + (shocks.services?.IN ?? 0))
   const indiaCharge = indiaFee ?? indiaServices * (1 + policies.indiaServicesMarkup)
-  for (const [id, amount] of [['US', usServices + 22500], ['CH', 16100], ['IN', indiaServices], ['BE', belgianCost]]) {
+  for (const [id, amount] of [['US', usServices + US_HEADQUARTERS_COST], ['CH', SWISS_OPERATING_COST], ['IN', indiaServices], ['BE', belgianCost]]) {
     book.post(id, 'operatingExpenses', 'externalClearing', amount)
   }
   const royaltyBase = sum(sales.filter(sale => sale.channel === 'LRD' || sale.channel === 'direct').map(sale => sale.revenue))

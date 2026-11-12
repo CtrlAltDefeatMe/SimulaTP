@@ -15,7 +15,8 @@ The simulator uses a synthetic scenario. Tax and duty rates are illustrative. Sc
 - An opening sequence on the first load of each browser session: the bars of the TH monogram tumble into place, the PlayTP name appears, and both shrink into the brand corner. It can be skipped, does not play when reduced motion is requested, and replays with `?intro` in the address
 - An automatic full-year run at unchanged prices and fees, with a pop-up that explains each out-of-range result, and a replay of the same year
 - An optional price floor: no goods price below standard cost plus a markup
-- Quarterly reviews of goods prices and service fees, and year-end adjustments
+- Quarterly reviews of goods prices and service fees, and year-end adjustments. Each distributor holds about two months of stock on a FIFO basis, so a price change reaches its cost of sales about two months later
+- A default group that earns a consolidated operating margin in the high teens (18.7%), with a high-margin, a mid-margin and a thin-margin product line in every market
 - Income tax by entity, and customs duty on declared transfer prices as a memo
 
 Customs duty is not deducted from operating profit, and all amounts are in US dollars. There is no currency layer.

@@ -1,4 +1,4 @@
-import { ENTITIES, POLICY_LABELS, PRODUCTS } from './engine.mjs';
+import { DISTRIBUTOR_COST_RATE, ENTITIES, POLICY_LABELS, PRODUCTS } from './engine.mjs';
 import { allocationPanel, renderYearEnd } from './year-end-view.mjs';
 
 const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
@@ -231,7 +231,8 @@ function openingInventoryPanel(routes, openingPriceMethod) {
     <div class="panel-header"><h2 id="pricing-assumptions-heading">January opening inventory and starting prices</h2></div>
     <div class="pricing-assumptions-copy">
       <p>The model assumes each distributor opens January 1 with two months of base demand per product family, one month per lot. FIFO issues the November 2026 lot first, at 97% of the historical reference transfer price. The December 2026 lot carries 100% of that reference price.</p>
-      <p>The historical reference price equals the distributor’s base net resale price less operating expenses and the historical operating margin. The assumptions are 13% for expenses and 3% for margin at LRDs, and 19% for expenses and 7.5% for margin at FFDs. Both percentages are applied to the base net resale price.</p>
+      <p>The historical reference price equals the distributor’s base net resale price less operating expenses and the historical operating margin. The assumptions are ${compactPercent.format(DISTRIBUTOR_COST_RATE.lrd)} for expenses and 3% for margin at LRDs, and ${compactPercent.format(DISTRIBUTOR_COST_RATE.ffd)} for expenses and 7.5% for margin at FFDs. Both percentages are applied to the base net resale price.</p>
+      <p>During the year each distributor orders enough to hold about two months of base demand. A new transfer price applies to new shipments only, and the older stock is sold first. A price change therefore reaches a distributor’s cost of sales about two months after it takes effect.</p>
       <p>When a scenario starts, the model sets transfer prices for new shipments to target each distributor’s full-year budget margin, using the FIFO costs and quantities expected to enter cost of sales. January’s margin can differ from the annual target because it reflects the cost of the opening lots sold that month.</p>
       ${openingPriceMethod === 'legacy' ? '<p class="pricing-assumptions-note">This in-progress scenario started with the prior pricing method. The FIFO-based starting prices apply to new or reset scenarios.</p>' : ''}
       ${notes.length ? `<ul class="pricing-assumptions-note">${notes.map(route => `<li><strong>${html(entityName(route.from))} to ${html(entityName(route.to))}.</strong> ${html(route.openingNote)}</li>`).join('')}</ul>` : ''}
