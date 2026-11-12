@@ -26,10 +26,11 @@
 /* Year-end review */
 .year-end-review { display: grid; gap: 12px; }
 .year-end-stats .kpi-number { font-size: clamp(19px, 2vw, 26px); }
-.year-end-table { min-width: 880px; }
+.year-end-table { min-width: 1020px; }
+.year-end-table .status-chip { display: block; width: fit-content; margin: 4px 0 0 auto; }
 .year-end-table tbody th { background: var(--surface); }
 .year-end-table tbody tr:last-child th { border-bottom: 0; }
-.year-end-table select { width: auto; min-width: 250px; font-size: 12px; }
+.year-end-table select { width: 196px; min-width: 0; font-size: 12px; }
 #year-end-message:not(:empty) { flex: 1 1 260px; }
 #year-end-message p { margin: 0; }
 
@@ -52,6 +53,62 @@ label.field.field-flag, .field-flag input { color: var(--negative); }
 .panel-note { padding: 0 20px 12px; }
 .rate-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 11px; }
 
+/* Service fees and local statutory results */
+.service-table { min-width: 760px; }
+.stat-table { min-width: 940px; }
+.service-table tbody th, .stat-table tbody th { background: var(--surface); }
+.service-table tbody tr:last-child th, .stat-table tbody tr:last-child th { border-bottom: 0; }
+.stat-table .pricing-out-of-policy > th { color: var(--negative); }
+.service-fee-table { min-width: 880px; }
+.service-fee-table .pricing-channel { width: 24%; }
+small.positive { color: var(--positive); }
+small.negative { color: var(--negative); }
+
+/* Year summary pop-up */
+.summary-dialog {
+  width: min(780px, calc(100vw - 28px));
+  max-height: min(860px, calc(100dvh - 28px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(39, 52, 88, .28);
+  overflow: hidden;
+}
+.summary-dialog[open] { display: flex; flex-direction: column; }
+.summary-dialog::backdrop { background: rgba(39, 52, 88, .46); }
+.summary-head, .summary-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 22px; }
+.summary-head { border-bottom: 1px solid var(--line); }
+.summary-head h2 { font-size: 22px; letter-spacing: -.035em; }
+.summary-head h2:focus { outline: 0; }
+.summary-foot { border-top: 1px solid var(--line); background: #f3f8ff; }
+.summary-foot p { flex: 1 1 220px; color: var(--secondary); font-size: 13px; line-height: 1.45; }
+.summary-foot .view-controls { align-items: center; }
+.summary-body { display: grid; gap: 12px; padding: 18px 22px 22px; overflow-y: auto; font-size: 14px; line-height: 1.55; }
+.summary-lead { color: var(--navy); font-size: 17px; font-weight: 720; letter-spacing: -.02em; line-height: 1.35; }
+.summary-section { margin-top: 6px; color: var(--secondary); font-size: 11px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; }
+.summary-card { display: grid; gap: 8px; padding: 13px 15px; border: 1px solid var(--border); border-left: 4px solid #9cc5b2; border-radius: 10px; }
+.summary-card.outside { border-color: #ecc9cc; border-left-color: var(--negative); background: #fffafa; }
+.summary-card header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.summary-card h3 { font-size: 15px; }
+.summary-result { color: var(--secondary); font-size: 13px; }
+.summary-result strong { color: var(--navy); }
+.summary-card.outside .summary-result strong { color: var(--negative); }
+.summary-flag { color: var(--negative); font-size: 13px; font-weight: 650; }
+.summary-why { font-size: 13.5px; }
+.summary-bridge { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.summary-bridge li { display: grid; gap: 1px; padding: 6px 9px; border-radius: 7px; background: var(--page); font-size: 11px; }
+.summary-card.outside .summary-bridge li { background: #f8f1f1; }
+.summary-bridge span { color: var(--secondary); }
+.summary-bridge strong { color: var(--navy); font-size: 13px; }
+.summary-bridge strong.positive { color: var(--positive); }
+.summary-bridge strong.negative { color: var(--negative); }
+.summary-bridge .summary-bridge-result { background: var(--navy); }
+.summary-card.outside .summary-bridge .summary-bridge-result { background: var(--navy); }
+.summary-bridge .summary-bridge-result span { color: #cfdcf0; }
+.summary-bridge .summary-bridge-result strong { color: #fff; }
+
 @media (max-width: 1090px) {
   .brief-grid, .allocation-grid { grid-template-columns: minmax(0, 1fr); }
 }
@@ -59,5 +116,8 @@ label.field.field-flag, .field-flag input { color: var(--negative); }
   .glossary { grid-template-columns: minmax(0, 1fr); padding: 0 13px 16px; }
   .brief-copy { padding: 0 13px 14px; }
   .brief-steps { padding: 0 13px 14px 32px; }
-  .year-end-table select { min-width: 200px; }
+  .summary-head, .summary-foot { padding: 13px 15px; }
+  .summary-body { padding: 14px 15px 18px; }
+  .summary-foot p { display: none; }
+  .summary-foot .view-controls, .summary-foot .button { width: 100%; }
 }

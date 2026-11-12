@@ -107,13 +107,69 @@ function pricingTable(routes, editing, priceFloor) {
   </section>`;
 }
 
+const serviceNames = { PL: 'Toll manufacturing', IN: 'Shared services' };
+
+function feeInput(service) {
+  const label = `New monthly fee in USD, ${entityName(service.id)}`;
+  return `<div class="price-input">
+    <span aria-hidden="true">$</span>
+    <input type="number" inputmode="decimal" min="0" step="0.01" aria-label="${html(label)}"
+      aria-describedby="pricing-override-help" data-service-fee="${html(service.id)}">
+  </div>`;
+}
+
+function policyFeeButton(service) {
+  if (!Number.isFinite(service.recommended)) return '—';
+  const display = dollars.format(service.recommended);
+  const label = `Use policy fee ${display} a month for ${entityName(service.id)}`;
+  return `<button class="pricing-quote" type="button" aria-label="${html(label)}" data-goods-price-quote="${service.recommended.toFixed(2)}">${display}</button>`;
+}
+
+// Poland and India are paid a fixed monthly fee, so their markup moves with their cost.
+function serviceFeeTable(services, actual, serviceBudget, editing) {
+  const total = (months, id, key) => months.reduce((sum, month) => sum + month[id][key], 0);
+  // The year so far against the budget for the same months, so a slow season is not read as a saving.
+  const toDate = (id) => {
+    if (!actual.length) return null;
+    const months = actual.map(month => month.services);
+    const cost = total(months, id, 'cost');
+    return { cost, budget: total(serviceBudget.slice(0, actual.length), id, 'cost'), fees: total(months, id, 'fee') };
+  };
+  return `<section class="panel" aria-labelledby="service-fee-heading">
+    <div class="panel-header"><div><h2 id="service-fee-heading">Service fees</h2><p class="subtitle">USD per month · a fixed fee set from budgeted cost plus the policy markup</p></div></div>
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="service-fee-heading">
+      <table class="pricing-table service-fee-table" aria-labelledby="service-fee-heading">
+        <thead><tr>
+          <th scope="col">Service</th><th scope="col">TP policy</th><th scope="col">Budget cost per month</th><th scope="col">Cost to date</th>
+          <th scope="col">Markup to date</th><th scope="col">Current fee</th><th scope="col">Policy fee</th><th scope="col">New fee</th>
+        </tr></thead>
+        <tbody>${services.map((service) => {
+          const ytd = toDate(service.id);
+          return `<tr>
+            <th scope="row" class="pricing-channel">${html(entityName(service.id))} <span aria-hidden="true">→</span><span class="visually-hidden"> to </span> ${html(service.customers.map(entityName).join(', '))}
+              <small class="pricing-margin-target">${serviceNames[service.id]}</small></th>
+            <td class="pricing-policy">Cost + ${compactPercent.format(service.target)}<small class="pricing-margin-target">Range ${compactPercent.format(service.low)}–${compactPercent.format(service.high)}</small></td>
+            <td>${format(service.budgetCost)}</td>
+            <td>${ytd ? `${format(ytd.cost)}<small class="pricing-margin-target">${ytd.cost < ytd.budget ? '−' : '+'}${markupPercent.format(Math.abs(ytd.cost / ytd.budget - 1))} vs budget to date</small>` : '—'}</td>
+            <td>${ytd ? percent.format(ytd.fees / ytd.cost - 1) : '—'}</td>
+            <td>${format(service.fee)}<small class="pricing-margin-target">${markupPercent.format(service.fee / service.budgetCost - 1)} on budget cost</small></td>
+            <td>${editing ? policyFeeButton(service) : format(service.recommended)}</td>
+            <td class="pricing-edit">${editing ? feeInput(service) : '—'}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>
+    <p class="field-note panel-note">The policy fee is the monthly fee for the rest of the year that brings the full-year markup on cost back to target, counting what has already been charged.</p>
+  </section>`;
+}
+
 function entityResultsPanel(revealed, rows, routes) {
   const showForecast = revealed < 12;
   const actualHeading = revealed ? `YTD actuals through ${monthName(revealed)}` : 'YTD actuals';
   const title = showForecast ? 'YTD actuals and full-year forecast' : 'Full-year actuals';
   const detail = showForecast
-    ? 'The forecast combines YTD actuals with budget assumptions for the remaining months at current goods transfer prices.'
-    : 'January through December 2027';
+    ? 'US GAAP. The forecast combines YTD actuals with budget assumptions for the remaining months at current transfer prices and fees. Range checks are provisional until December, when they move to local statutory results.'
+    : 'January through December 2027 · US GAAP, with each range tested on the local statutory result';
   const columnHeadings = (isForecast = false) => resultColumns.map(([, label], index) =>
     `<th scope="col"${isForecast && index === 0 ? ' class="pricing-forecast-first"' : ''}>${html(label)}</th>`).join('');
   const targets = new Map(routes.map(({ to, targetMargin }) => [to, targetMargin]));
@@ -122,7 +178,12 @@ function entityResultsPanel(revealed, rows, routes) {
     if (key === 'operatingMargin' && Number.isFinite(policy?.target)) {
       // One short line each, so the margin column stays narrow.
       const detail = text => `<small class="pricing-margin-target">${text}</small>`;
-      if (Number.isFinite(policy.forecast) && format(policy.forecast, percent) !== format(result?.[key], percent)) {
+      const stat = policy.basis === 'stat';
+      const name = policy.measure === 'markup' ? 'markup' : policy.label || 'margin';
+      if (stat && Number.isFinite(policy.forecast)) {
+        if (Number.isFinite(policy.gaap)) policyDetails += detail(`US GAAP ${html(name)} ${percent.format(policy.gaap)}`);
+        policyDetails += detail(`Local stat ${html(name)} ${percent.format(policy.forecast)}`);
+      } else if (Number.isFinite(policy.forecast) && format(policy.forecast, percent) !== format(result?.[key], percent)) {
         policyDetails += detail(`${html(policy.label || 'Policy margin')} ${percent.format(policy.forecast)}`);
       }
       if (Number.isFinite(policy.low) && policy.low !== policy.high) {
@@ -193,14 +254,14 @@ export function renderGoodsPricing(review) {
     ? renderYearEnd({ ...review, message: review.yearEndMessage }) : '';
   const results = `${yearEnd}${entityResultsPanel(revealed, entityResults, routes)}${allocationPanel(review)}`;
   const assumptions = openingInventoryPanel(routes, openingPriceMethod);
-  const prices = pricingTable(routes, editing, review.priceFloor);
+  const prices = `${pricingTable(routes, editing, review.priceFloor)}${serviceFeeTable(review.services, review.actual, review.serviceBudget, editing)}`;
   if (!editing) return `${results}${assumptions}
     ${nextReview ? `<section class="panel pricing-period" aria-labelledby="pricing-review-heading">
       <div>
         <p class="pricing-period-label">Next quarterly review</p>
         <h2 id="pricing-review-heading">${monthName(nextReview)} close</h2>
       </div>
-      <div class="pricing-period-copy"><p>Reveal ${monthName(nextReview)} actuals to review ${periodLabel(nextReview + 1)} prices.</p></div>
+      <div class="pricing-period-copy"><p>Reveal ${monthName(nextReview)} actuals to review ${periodLabel(nextReview + 1)} prices and fees.</p></div>
     </section>` : ''}
     ${prices}`;
 
@@ -211,19 +272,19 @@ export function renderGoodsPricing(review) {
         <h2 id="pricing-period-heading">${periodLabel(effectiveMonth)}</h2>
       </div>
       <div class="pricing-period-copy">
-        <p id="pricing-override-help">Select a policy price or enter your own USD per unit. Blank fields keep their current prices.</p>
+        <p id="pricing-override-help">Select a policy price or fee, or enter your own in USD. Goods prices are per unit and service fees are per month. Blank fields keep their current values.</p>
       </div>
     </section>
     ${prices}
     <div class="panel form-footer pricing-footer">
       <div id="goods-pricing-message">${pricingStatus(message)}</div>
-      <button class="button primary" type="submit">Apply transfer prices</button>
+      <button class="button primary" type="submit">Apply prices and fees</button>
     </div>
   </form>`;
 }
 
 export function useGoodsPriceQuote(button) {
-  const input = button.closest('tr')?.querySelector('[data-goods-price-route]');
+  const input = button.closest('tr')?.querySelector('[data-goods-price-route], [data-service-fee]');
   if (!input) return;
   input.value = button.dataset.goodsPriceQuote;
   input.focus();
@@ -242,4 +303,17 @@ export function readGoodsPriceOverrides(form) {
     overrides[route][product] = price;
   }
   return overrides;
+}
+
+export function readServiceFees(form) {
+  const fees = Object.create(null);
+  for (const input of form.querySelectorAll('[data-service-fee]')) {
+    if (input.value === '') continue;
+    const fee = input.valueAsNumber;
+    if (!Number.isFinite(fee) || fee < 0 || input.validity.stepMismatch || !Number.isSafeInteger(Math.round(fee * 100))) {
+      throw new RangeError('Enter a nonnegative monthly fee in USD with up to two decimal places.');
+    }
+    fees[input.dataset.serviceFee] = fee;
+  }
+  return fees;
 }
