@@ -1,10 +1,13 @@
 import { ENTITIES, POLICY_LABELS, PRODUCTS } from './engine.mjs';
+import { allocationPanel, renderYearEnd } from './year-end-view.mjs';
 
 const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const compactPercent = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 4 });
+const markupPercent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const monthNames = new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' });
 const reviewMonths = [3, 6, 9];
+const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range', off: 'Out of policy' };
 const resultColumns = [
   ['revenue', 'Net sales', dollars],
   ['rdExpense', 'R&D expense', dollars],
@@ -40,7 +43,7 @@ function priceInput(route, price) {
   const label = `${productName(price.product)} new price in USD per unit, ${entityName(route.from)} to ${entityName(route.to)}`;
   return `<div class="price-input">
     <span aria-hidden="true">$</span>
-    <input type="number" inputmode="decimal" min="0" step="0.01" aria-label="${html(label)}"
+    <input type="number" inputmode="decimal" min="${Number.isFinite(price.floor) ? price.floor.toFixed(2) : 0}" step="0.01" aria-label="${html(label)}"
       aria-describedby="pricing-override-help"
       data-goods-price-route="${html(route.key)}" data-goods-price-product="${html(price.product)}">
   </div>`;
@@ -64,14 +67,26 @@ function shortPolicy(route) {
   return route.policyLabel ?? POLICY_LABELS[route.policy] ?? '';
 }
 
-function pricingTable(routes, editing) {
+// The current price as a markup on the supplier's standard cost. A price below cost shows in red.
+function costMarkup(price) {
+  if (!Number.isFinite(price.standardCost) || !price.standardCost) return '—';
+  const markup = price.applied / price.standardCost - 1;
+  const atFloor = Number.isFinite(price.floor) && price.applied <= price.floor;
+  return `<span class="${markup < 0 ? 'negative' : ''}">${markup < 0 ? '−' : ''}${markupPercent.format(Math.abs(markup))}</span>${atFloor ? '<small class="pricing-margin-target">At the floor</small>' : ''}`;
+}
+
+function pricingTable(routes, editing, priceFloor) {
+  const rule = priceFloor
+    ? `Price floor: standard cost plus ${compactPercent.format(priceFloor.markup)}. No price can go below it.`
+    : 'No price floor is set. A price can go below standard cost.';
   return `<section class="panel" aria-labelledby="goods-pricing-table-heading">
-    <div class="panel-header"><div><h2 id="goods-pricing-table-heading">Goods prices by channel</h2><p class="subtitle">USD per unit</p></div></div>
+    <div class="panel-header"><div><h2 id="goods-pricing-table-heading">Goods prices by channel</h2><p class="subtitle">USD per unit · ${rule}</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="goods-pricing-table-heading">
       <table class="pricing-table" aria-labelledby="goods-pricing-table-heading">
         <thead><tr>
           <th scope="col">Channel</th><th scope="col">TP policy</th><th scope="col">Product family</th>
-          <th scope="col">Current price</th><th scope="col">Policy price</th><th scope="col">New price</th>
+          <th scope="col">Standard cost</th><th scope="col">Current price</th><th scope="col">Markup on cost</th>
+          <th scope="col">Policy price</th><th scope="col">New price</th>
         </tr></thead>
         ${routes.map(route => `<tbody data-pricing-channel="${html(route.key)}">
           ${route.prices.map((price, index) => `<tr>
@@ -79,11 +94,13 @@ function pricingTable(routes, editing) {
               ${html(entityName(route.from))} <span aria-hidden="true">→</span><span class="visually-hidden"> to </span> ${html(entityName(route.to))}
             </th><td class="pricing-policy" rowspan="${route.prices.length}">${html(shortPolicy(route))}</td>` : ''}
             <th scope="row" class="pricing-family">${html(productName(price.product))}</th>
+            <td>${format(price.standardCost)}${Number.isFinite(price.floor) ? `<small class="pricing-margin-target">Floor ${format(price.floor)}</small>` : ''}</td>
             <td>${format(price.applied)}</td>
+            <td>${costMarkup(price)}</td>
             <td>${editing ? policyPriceButton(route, price) : format(price.recommended)}</td>
             <td class="pricing-edit">${editing ? priceInput(route, price) : '—'}</td>
           </tr>`).join('')}
-          ${editing && route.note ? `<tr class="pricing-route-note"><td colspan="6">${html(route.note)}</td></tr>` : ''}
+          ${editing && route.note ? `<tr class="pricing-route-note"><td colspan="8">${html(route.note)}</td></tr>` : ''}
         </tbody>`).join('')}
       </table>
     </div>
@@ -103,11 +120,21 @@ function entityResultsPanel(revealed, rows, routes) {
   const resultCells = (result, policy, isForecast = false) => resultColumns.map(([key, , formatter], index) => {
     let policyDetails = '';
     if (key === 'operatingMargin' && Number.isFinite(policy?.target)) {
-      const comparable = Number.isFinite(policy.forecast) && format(policy.forecast, percent) !== format(result?.[key], percent)
-        ? `${html(policy.label || 'Policy margin')} ${percent.format(policy.forecast)} · `
-        : '';
-      policyDetails = `<small class="pricing-margin-target">${comparable}Target ${percent.format(policy.target)}</small>`;
-      if (isForecast && policy.outOfPolicy) policyDetails += '<small class="pricing-policy-status">Out of policy</small>';
+      // One short line each, so the margin column stays narrow.
+      const detail = text => `<small class="pricing-margin-target">${text}</small>`;
+      if (Number.isFinite(policy.forecast) && format(policy.forecast, percent) !== format(result?.[key], percent)) {
+        policyDetails += detail(`${html(policy.label || 'Policy margin')} ${percent.format(policy.forecast)}`);
+      }
+      if (Number.isFinite(policy.low) && policy.low !== policy.high) {
+        policyDetails += detail(`Range ${percent.format(policy.low)}–${percent.format(policy.high)}`);
+      }
+      policyDetails += detail(`Target ${percent.format(policy.target)}`);
+      if (policy.outOfPolicy) {
+        policyDetails += `<small class="pricing-policy-status">${statusLabels[policy.status] ?? statusLabels.off}</small>`;
+        if (policy.exposure > 0) policyDetails += `<small class="pricing-policy-status">Tax at risk ${dollars.format(policy.exposure)}</small>`;
+      } else if (policy.status === 'within' && Number.isFinite(policy.low) && Number.isFinite(policy.forecast)) {
+        policyDetails += `<small class="pricing-policy-ok">${statusLabels.within}</small>`;
+      }
     }
     const forecastClasses = index === 0 ? 'pricing-forecast-value pricing-forecast-first' : 'pricing-forecast-value';
     return `<td${isForecast ? ` class="${forecastClasses}"` : ''}>${format(result?.[key], formatter)}${policyDetails}</td>`;
@@ -127,7 +154,7 @@ function entityResultsPanel(revealed, rows, routes) {
       <tbody>${rows.map(({ id, ytd, fullYear, policy }) => {
         const comparison = policy ?? { target: targets.get(id) };
         const rowClass = id === 'consolidated' ? 'pricing-total' : '';
-        const statusClass = showForecast && comparison.outOfPolicy ? 'pricing-out-of-policy' : '';
+        const statusClass = comparison.outOfPolicy ? 'pricing-out-of-policy' : '';
         return `<tr class="${[rowClass, statusClass].filter(Boolean).join(' ')}">
           <th scope="row" class="table-name">${html(entityName(id))}</th>
           ${resultCells(revealed ? ytd : null, showForecast ? undefined : comparison)}${showForecast ? resultCells(fullYear, comparison, true) : ''}
@@ -158,12 +185,15 @@ export function pricingStatus(message, error = false) {
     : `<p class="form-message" role="status">${html(message)}</p>`;
 }
 
-export function renderGoodsPricing({ revealed, effectiveMonth, routes, message, entityResults, openingPriceMethod }) {
+export function renderGoodsPricing(review) {
+  const { revealed, effectiveMonth, routes, message, entityResults, openingPriceMethod } = review;
   const editing = reviewMonths.includes(revealed) && effectiveMonth === revealed + 1;
   const nextReview = reviewMonths.find(month => month > revealed);
-  const results = entityResultsPanel(revealed, entityResults, routes);
+  const yearEnd = revealed === 12 && review.yearEnd
+    ? renderYearEnd({ ...review, message: review.yearEndMessage }) : '';
+  const results = `${yearEnd}${entityResultsPanel(revealed, entityResults, routes)}${allocationPanel(review)}`;
   const assumptions = openingInventoryPanel(routes, openingPriceMethod);
-  const prices = pricingTable(routes, editing);
+  const prices = pricingTable(routes, editing, review.priceFloor);
   if (!editing) return `${results}${assumptions}
     ${nextReview ? `<section class="panel pricing-period" aria-labelledby="pricing-review-heading">
       <div>

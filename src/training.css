@@ -1,0 +1,63 @@
+/* Case brief */
+.brief-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; align-items: start; }
+.brief-copy { display: grid; gap: 10px; padding: 0 20px 18px; font-size: 14px; line-height: 1.55; }
+.brief-copy strong { color: var(--navy); }
+.brief-steps { display: grid; gap: 9px; margin: 0; padding: 0 20px 18px 40px; font-size: 14px; line-height: 1.55; }
+.brief-steps a, .panel-header .subtitle a { color: var(--blue); font-weight: 650; }
+.brief-table { font-size: 13px; }
+.brief-table th, .brief-table td { text-align: left; white-space: normal; vertical-align: top; line-height: 1.5; }
+.brief-table tbody th { min-width: 150px; background: var(--surface); }
+.brief-table td:nth-child(2) { min-width: 170px; color: var(--secondary); }
+/* On a narrow screen the table scrolls sideways so the last column stays readable. */
+.brief-table td:nth-child(3) { min-width: 300px; }
+.brief-table tbody tr:last-child th { border-bottom: 0; }
+.glossary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 30px; margin: 0; padding: 0 20px 20px; }
+.glossary dt { color: var(--navy); font-size: 13px; font-weight: 700; }
+.glossary dd { margin: 3px 0 0; color: var(--secondary); font-size: 13px; line-height: 1.5; }
+.brief-start { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 20px; background: #f3f8ff; }
+.brief-start p { color: var(--secondary); font-size: 13px; }
+
+/* Ranges and status */
+.pricing-policy-ok { display: block; margin-top: 2px; color: var(--positive); font-size: 10px; font-weight: 690; }
+.status-chip { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 690; }
+.status-chip.ok { background: #e6f3ed; color: var(--positive); }
+.status-chip.miss { background: #fbecec; color: var(--negative); }
+
+/* Year-end review */
+.year-end-review { display: grid; gap: 12px; }
+.year-end-stats .kpi-number { font-size: clamp(19px, 2vw, 26px); }
+.year-end-table { min-width: 880px; }
+.year-end-table tbody th { background: var(--surface); }
+.year-end-table tbody tr:last-child th { border-bottom: 0; }
+.year-end-table select { width: auto; min-width: 250px; font-size: 12px; }
+#year-end-message:not(:empty) { flex: 1 1 260px; }
+#year-end-message p { margin: 0; }
+
+/* A value the learner may set but should question. Color is backed by a message. */
+label.field.field-flag, .field-flag input { color: var(--negative); }
+.field-flag input { border-color: #d99aa0; font-weight: 650; }
+.field-warning { color: var(--negative); font-size: 12px; font-weight: 600; line-height: 1.5; }
+.detail-list li.flagged span, .detail-list li.flagged strong { color: var(--negative); }
+
+/* Price floor */
+.check-field { display: flex; align-items: flex-start; gap: 9px; color: var(--navy); font-size: 13px; font-weight: 650; line-height: 1.4; }
+.check-field input { flex: 0 0 auto; width: 17px; min-height: 0; height: 17px; margin: 1px 0 0; padding: 0; accent-color: var(--navy); }
+.pricing-table { min-width: 880px; }
+.pricing-table .pricing-channel { width: 19%; }
+
+/* Profit allocation, tax and customs */
+.allocation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
+.detail-list li span small { display: block; margin-top: 2px; font-size: 11px; }
+.total-row td { background: #f3f8ff; font-weight: 680; }
+.panel-note { padding: 0 20px 12px; }
+.rate-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 11px; }
+
+@media (max-width: 1090px) {
+  .brief-grid, .allocation-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 755px) {
+  .glossary { grid-template-columns: minmax(0, 1fr); padding: 0 13px 16px; }
+  .brief-copy { padding: 0 13px 14px; }
+  .brief-steps { padding: 0 13px 14px 32px; }
+  .year-end-table select { min-width: 200px; }
+}

@@ -1,4 +1,6 @@
 export const SHOCK_KEYS = Object.freeze(['demand', 'salesPrice', 'materialCost']);
+/** Shocks that also vary by market. Material costs move with the group. */
+export const MARKET_SHOCK_KEYS = Object.freeze(['demand', 'salesPrice']);
 
 export const DEFAULT_SIMULATION = Object.freeze({
   seed: 'SimulaTP-2027',
@@ -12,6 +14,8 @@ export const DEFAULT_SIMULATION = Object.freeze({
     Object.freeze([0.25, 1, 0.20]),
     Object.freeze([0.15, 0.20, 1]),
   ]),
+  // Half-width of each market's own monthly deviation, added to the group-wide shock.
+  marketVariation: Object.freeze({ demand: 0.10, salesPrice: 0.05 }),
 });
 
 const shockLabels = {
@@ -73,7 +77,18 @@ function prepareConfig(config) {
     }
     return { min, mode, max };
   });
-  return { seed: String(seed), distributions, factor: factorCorrelation(config.correlation) };
+  // Scenarios saved before market variation existed keep their group-wide shocks.
+  const marketVariation = MARKET_SHOCK_KEYS.map((key) => {
+    const value = config.marketVariation?.[key] ?? 0;
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      throw new RangeError(`${shockLabels[key]} variation by market must be between 0% and 100%.`);
+    }
+    if (distributions[SHOCK_KEYS.indexOf(key)].min - value < -1) {
+      throw new RangeError(`${shockLabels[key]} minimum less its variation by market cannot fall below -100%.`);
+    }
+    return value;
+  });
+  return { seed: String(seed), distributions, marketVariation, factor: factorCorrelation(config.correlation) };
 }
 
 /** Throw a RangeError if the seed, triangular distributions, or correlation are invalid. */
@@ -132,18 +147,34 @@ function triangularQuantile(probability, { min, mode, max }) {
   return max - width * Math.sqrt((1 - probability) * (1 - modeFraction));
 }
 
-/** Generate monthly fractional shocks. The correlation applies to the underlying normal draws. */
-export function simulateShocks(config = DEFAULT_SIMULATION, months = 12) {
+/**
+ * Generate monthly fractional shocks. The correlation applies to the underlying normal draws.
+ * When `markets` are given, each month also carries `markets[id]`: that market's own
+ * deviation in demand and sales price, to be added to the group-wide shock.
+ */
+export function simulateShocks(config = DEFAULT_SIMULATION, months = 12, markets = []) {
   if (!Number.isSafeInteger(months) || months <= 0) {
     throw new RangeError('Months must be a positive integer.');
   }
-  const { seed, distributions, factor } = prepareConfig(config);
+  const { seed, distributions, marketVariation, factor } = prepareConfig(config);
   const normal = createNormalSampler(createUniformSampler(seed));
+  // A separate stream keeps the group-wide draws identical for a given seed,
+  // whatever the market list or variation settings.
+  const marketUniform = createUniformSampler(seed + '/markets');
+  const unit = { min: -1, mode: 0, max: 1 };
   return Array.from({ length: months }, () => {
     const independent = SHOCK_KEYS.map(() => normal());
-    return Object.fromEntries(SHOCK_KEYS.map((key, i) => {
+    const shock = Object.fromEntries(SHOCK_KEYS.map((key, i) => {
       const correlated = factor[i].reduce((sum, weight, j) => sum + weight * independent[j], 0);
       return [key, triangularQuantile(normalCdf(correlated), distributions[i])];
     }));
+    if (markets.length) {
+      shock.markets = Object.fromEntries(markets.map((id) => [
+        id, Object.fromEntries(MARKET_SHOCK_KEYS.map((key, i) => [
+          key, marketVariation[i] * triangularQuantile(marketUniform(), unit),
+        ])),
+      ]));
+    }
+    return shock;
   });
 }

@@ -1,7 +1,13 @@
-import { applyGoodsPrices, createConfig, ENTITIES, POLICY_LABELS, PRODUCTS, quarterPricingMonth, reviewGoodsPricing, runYear } from './engine.mjs';
+import {
+  applyGoodsPrices, applyYearEndAdjustments, createConfig, CUSTOMS_ROUTES, ENTITIES, MAX_ROYALTY_RATE, POLICY_LABELS, PRODUCTS,
+  productLineResults, profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms,
+  TAXED_ENTITIES, upgradeConfig,
+} from './engine.mjs';
+import { renderBrief } from './brief-view.mjs';
 import { landPolygons } from './land.mjs';
 import { pricingStatus, readGoodsPriceOverrides, renderGoodsPricing, useGoodsPriceQuote } from './pricing-view.mjs';
-import { SHOCK_KEYS } from './simulation.mjs';
+import { MARKET_SHOCK_KEYS, SHOCK_KEYS } from './simulation.mjs';
+import { licenseeLossWarning, readYearEndChoices, royaltyWarning } from './year-end-view.mjs';
 
 const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -17,13 +23,14 @@ const formatPercent = new Intl.NumberFormat('en-US', { style: 'percent', minimum
 const formatDifference = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const iconPaths = {
+  brief: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
   dashboard: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
   map: '<path d="M4 4l5-2 6 3 5-2v16l-5 2-6-3-5 2zM9 2v16m6-13v16"/>',
   pricing: '<path d="M3 5h10l8 8-8 8-10-10z"/><circle cx="7.5" cy="9" r="1"/>',
   settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="currentColor"/><circle cx="15" cy="17" r="2.5" fill="currentColor"/>',
   next: '<path d="M5 12h13m-6-6 6 6-6 6"/>',
 };
-const views = { dashboard: '2027 performance', map: 'Transaction map', pricing: 'Goods transfer prices', settings: 'Scenario settings' };
+const views = { brief: 'Case brief', dashboard: '2027 performance', map: 'Transaction map', pricing: 'Goods transfer prices', settings: 'Scenario settings' };
 const categoryLabels = { goods: 'Tangible goods', royalty: 'Royalty', services: 'Services' };
 const categoryColors = { goods: '#4e73a0', royalty: '#92612e', services: '#227466' };
 const shockLabels = { demand: 'Demand', salesPrice: 'Sales price', materialCost: 'Material input cost' };
@@ -68,16 +75,17 @@ function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey));
     if (saved?.config && Number.isInteger(saved.revealed) && saved.revealed >= 0 && saved.revealed <= 12) {
-      const { config, revealed } = saved;
-      const unstarted = revealed === 0 && !config.goodsPriceSchedule?.length;
+      const { revealed } = saved;
+      const unstarted = revealed === 0 && !saved.config.goodsPriceSchedule?.length;
+      const config = upgradeConfig(saved.config, !unstarted);
       const restored = unstarted && config.startingPriceMethod === undefined
         ? { ...config, startingPriceMethod: defaults.startingPriceMethod } : config;
-      return { config: restored, year: runYear(restored), revealed };
+      return { config: restored, year: runYear(restored), revealed, returning: true };
     }
   } catch {
     // A malformed or outdated saved scenario should still let the dashboard open.
   }
-  return { config: defaults, year: runYear(defaults), revealed: 0 };
+  return { config: defaults, year: runYear(defaults), revealed: 0, returning: false };
 }
 
 function storeState() {
@@ -88,15 +96,16 @@ function storeState() {
   }
 }
 
-function viewFromHash() {
+function viewFromHash(fallback = 'dashboard') {
   const key = location.hash.slice(1);
-  return Object.hasOwn(views, key) ? key : 'dashboard';
+  return Object.hasOwn(views, key) ? key : fallback;
 }
 
 const initial = loadState();
 const state = {
   ...initial,
-  view: viewFromHash(),
+  // A first visit opens on the case brief. A saved scenario opens on the dashboard.
+  view: viewFromHash(initial.returning ? 'dashboard' : 'brief'),
   period: Math.max(0, initial.revealed - 1),
   metric: 'operatingProfit',
   filter: 'all',
@@ -104,6 +113,7 @@ const state = {
   mapBasis: initial.revealed ? 'actual' : 'budget',
   settingsMessage: '',
   pricingMessage: '',
+  yearEndMessage: '',
 };
 
 function revealButton() {
@@ -114,7 +124,7 @@ function revealButton() {
 function renderHeader() {
   const reviewButton = quarterPricingMonth(state.revealed)
     ? '<button class="button" type="button" data-action="review-prices">Review transfer prices</button>'
-    : '';
+    : state.revealed === 12 ? '<button class="button primary" type="button" data-action="review-prices">Year-end review</button>' : '';
   pageHeader.innerHTML = `
     <div>
       <p class="breadcrumb">Simulation <span aria-hidden="true">/</span> FY 2027</p>
@@ -283,6 +293,60 @@ function entityPanel(budget, actual) {
   </section>`;
 }
 
+function productLinePanel(budget, actual) {
+  const lines = productLineResults(actual ?? budget);
+  const total = lines.reduce((sum, line) => ({
+    units: sum.units + line.units, revenue: sum.revenue + line.revenue, cogs: sum.cogs + line.cogs,
+  }), { units: 0, revenue: 0, cogs: 0 });
+  const row = (name, line, className = '') => `<tr class="${className}">
+    <td class="table-name">${html(name)}</td><td>${amount(line.units, formatNumber)}</td><td>${amount(line.revenue)}</td>
+    <td>${amount(line.cogs)}</td><td>${amount(line.revenue - line.cogs)}</td>
+    <td>${amount(line.revenue ? (line.revenue - line.cogs) / line.revenue : 0, formatPercent)}</td>
+  </tr>`;
+  return `<section class="panel" aria-labelledby="product-heading">
+    <div class="panel-header"><div><h2 id="product-heading">Product lines</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · third-party sales at group cost · USD</p></div></div>
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="product-heading"><table>
+      <thead><tr><th scope="col">Product family</th><th scope="col">Units sold</th><th scope="col">Net sales</th><th scope="col">Cost of goods sold</th><th scope="col">Gross profit</th><th scope="col">Gross margin</th></tr></thead>
+      <tbody>${lines.map((line) => row(productFor(line.product), line)).join('')}${row('All product lines', total, 'total-row')}</tbody>
+    </table></div>
+  </section>`;
+}
+
+function customsRouteLabel({ from, to }) {
+  // Swiss-owned goods ship from and to the Belgian warehouse.
+  return `${mapLabel(from === 'CH' ? 'BE' : from)} → ${mapLabel(to === 'CH' ? 'BE' : to)}`;
+}
+
+function taxPanel(budget, actual) {
+  const { tax, customs } = summarizeTaxAndCustoms(state.config, [actual ?? budget]);
+  const basis = `${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD`;
+  return `<div class="dashboard-detail">
+    <section class="panel" aria-labelledby="tax-heading">
+      <div class="panel-header"><div><h2 id="tax-heading">Income tax</h2><p class="subtitle">${basis} · each entity’s rate applied to its operating profit</p></div></div>
+      <div class="table-scroll" tabindex="0" role="region" aria-labelledby="tax-heading"><table>
+        <thead><tr><th scope="col">Entity</th><th scope="col">Operating profit</th><th scope="col">Tax rate</th><th scope="col">Income tax</th></tr></thead>
+        <tbody>${TAXED_ENTITIES.map((id) => `<tr>
+          <td class="table-name">${html(labelFor(id))}</td><td>${amount(tax.entities[id].profit)}</td>
+          <td>${amount(tax.entities[id].rate, formatPercent)}</td><td>${amount(tax.entities[id].tax)}</td>
+        </tr>`).join('')}
+        <tr class="total-row"><td class="table-name">All entities</td><td>${amount(tax.profit)}</td><td>${amount(tax.effectiveRate, formatPercent)}</td><td>${amount(tax.total)}</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+    <section class="panel breakdown" aria-labelledby="customs-heading">
+      <div class="panel-header"><div><h2 id="customs-heading">Customs duty</h2><p class="subtitle">${basis} · duty on declared transfer prices</p></div></div>
+      ${metricList([
+        ...CUSTOMS_ROUTES.map((route) => {
+          const entry = customs.routes[route.key];
+          return [`${customsRouteLabel(route)} · ${formatPercent.format(entry.rate)}`, amount(entry.duty)];
+        }),
+        ['Total duty', amount(customs.total)],
+      ])}
+      <p class="field-note panel-note">Memo. Duty is not deducted from operating profit. Shipments from Belgium to Germany and France stay inside the EU.</p>
+    </section>
+  </div>`;
+}
+
 function controlPanels(budget, actual) {
   const { capacity, reconciliation } = actual ?? budget;
   const reconciliationNames = {
@@ -301,7 +365,10 @@ function controlPanels(budget, actual) {
     </section>
     <section class="panel breakdown" aria-labelledby="reconcile-heading">
       <div class="panel-header"><div><h2 id="reconcile-heading">Reconciliation</h2><p class="subtitle">Control differences · USD</p></div></div>
-      ${metricList(Object.entries(reconciliationNames).filter(([key]) => Number.isFinite(reconciliation[key])).map(([key, label]) => [label, amount(reconciliation[key], formatDifference)]))}
+      ${metricList(Object.entries(reconciliationNames).filter(([key]) => Number.isFinite(reconciliation[key])).map(([key, label]) => [
+        // Rounding first keeps a difference of a fraction of a cent from showing as -0.00.
+        label, amount(Math.round(reconciliation[key] * 100) / 100 || 0, formatDifference),
+      ]))}
     </section>
   </div>`;
 }
@@ -315,6 +382,8 @@ function renderDashboard() {
     ${kpis(budget.consolidated, actual?.consolidated)}
     ${chart()}
     ${entityPanel(budget, actual)}
+    ${productLinePanel(budget, actual)}
+    ${taxPanel(budget, actual)}
     <div class="dashboard-detail">${variancePanel(bridge)}${controlPanels(budget, actual)}</div>
     ${annualTable()}
     ${inventoryPanel(budget, actual)}`;
@@ -591,19 +660,30 @@ const policyFields = [
   ['belgiumMargin', 'Belgium warehouse target operating margin'],
   ['usServicesMarkup', 'US headquarters services markup'],
   ['indiaServicesMarkup', 'India shared services markup'],
+  ['royaltyRate', 'Swiss royalty to US, share of covered sales', MAX_ROYALTY_RATE * 100],
   ['usToSwissMarkup', 'US → Swiss cross-supply markup'],
   ['swissToUsMarkup', 'Swiss → US cross-supply markup'],
 ];
 
+const rangeFields = [
+  ['lrd', 'low', 'European LRD range, low'], ['lrd', 'high', 'European LRD range, high'],
+  ['ffd', 'low', 'Asian and Canadian FFD range, low'], ['ffd', 'high', 'Asian and Canadian FFD range, high'],
+];
+const marketVariationLabels = { demand: 'Demand variation by market (±%)', salesPrice: 'Sales price variation by market (±%)' };
 const correlationPairs = [[0, 1], [0, 2], [1, 2]];
 const distributionColumns = [['min', 'Minimum'], ['mode', 'Most likely'], ['max', 'Maximum']];
 
-function numberInput(name, value, { min, max, step = 'any', label, disabled = false } = {}) {
-  return `<input type="number" name="${name}" value="${html(value)}" step="${step}" ${min === undefined ? '' : `min="${min}"`} ${max === undefined ? '' : `max="${max}"`} ${label ? `aria-label="${html(label)}"` : ''} ${disabled ? 'disabled' : 'required'}>`;
+function numberInput(name, value, { min, max, step = 'any', label, describedBy, disabled = false } = {}) {
+  return `<input type="number" name="${name}" value="${html(value)}" step="${step}" ${min === undefined ? '' : `min="${min}"`} ${max === undefined ? '' : `max="${max}"`} ${label ? `aria-label="${html(label)}"` : ''} ${describedBy ? `aria-describedby="${describedBy}"` : ''} ${disabled ? 'disabled' : 'required'}>`;
 }
 
 function percentInput(value) {
   return Number((value * 100).toFixed(8));
+}
+
+// The margin target is shown to two decimals. An unchanged field keeps the exact stored target.
+function marginInput(value) {
+  return Number((value * 100).toFixed(2));
 }
 
 function annualBudgetMargin(budget) {
@@ -620,7 +700,15 @@ function rdAllocationLabel(usShare) {
 }
 
 function renderSettings() {
-  const { simulation, capacity, policies, annualOperatingMargin, rd = createConfig().rd } = state.config;
+  const defaults = createConfig();
+  const {
+    simulation, capacity, policies, annualOperatingMargin, rd = defaults.rd, ranges = defaults.ranges,
+    tax = defaults.tax, customs = defaults.customs, priceFloor = defaults.priceFloor,
+  } = state.config;
+  const marketVariation = simulation.marketVariation ?? { demand: 0, salesPrice: 0 };
+  const royalty = royaltyCheck(state.config);
+  // Applying a scenario starts a new year, so the budget is the projection that matters here.
+  const licensee = profitAllocation(state.year.budget);
   const marginLocked = state.revealed > 0;
   const target = annualOperatingMargin ?? annualBudgetMargin(state.year.budget);
   pageBody.innerHTML = `
@@ -629,7 +717,7 @@ function renderSettings() {
         <div class="panel-header"><div><h2 id="annual-plan-heading">Annual financial plan</h2><p class="subtitle">2027 consolidated budget and R&D assumptions</p></div></div>
         <div class="form-fields">
           <div class="scenario-plan-fields">
-            <label class="field">Consolidated target operating margin (%)${numberInput('annualOperatingMargin', percentInput(target), { disabled: marginLocked })}</label>
+            <label class="field">Consolidated target operating margin (%)${numberInput('annualOperatingMargin', marginInput(target), { disabled: marginLocked })}</label>
             <label class="field">R&amp;D as a share of consolidated sales (%)${numberInput('rd.salesRate', percentInput(rd.salesRate), { min: 0, max: 10 })}</label>
             <label class="field">US share of R&amp;D (%)${numberInput('rd.usShare', percentInput(rd.usShare), { min: 0, max: 100 })}</label>
           </div>
@@ -651,6 +739,10 @@ function renderSettings() {
               </tr>`).join('')}</tbody>
             </table></div>
             <div class="form-fields">
+              <div class="field-pair">
+                ${MARKET_SHOCK_KEYS.map((key) => `<label class="field">${marketVariationLabels[key]}${numberInput(`marketVariation.${key}`, percentInput(marketVariation[key]), { min: 0, max: 100 })}</label>`).join('')}
+              </div>
+              <p class="field-note">The shocks above move every market together. Each market’s demand and sales price also move by up to this much on their own each month. Enter 0 to keep all markets in step.</p>
               <label class="field">Simulation seed<input name="seed" value="${html(simulation.seed)}" maxlength="100" required></label>
             </div>
           </section>
@@ -671,8 +763,32 @@ function renderSettings() {
           </section>
           <section class="panel" aria-labelledby="pricing-heading">
             <div class="panel-header"><div><h2 id="pricing-heading">Transfer pricing policies</h2><p class="subtitle">Targets and markups as percentages</p></div></div>
-            <div class="form-fields field-pair">
-              ${policyFields.map(([key, label]) => `<label class="field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max: 100 })}</label>`).join('')}
+            <div class="form-fields">
+              <div class="field-pair">
+                ${policyFields.map(([key, label, max = 100]) => key === 'royaltyRate'
+                  ? `<label class="field ${royalty.belowResearch || licensee.licenseeLoss ? 'field-flag' : ''}" id="royalty-field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max, describedBy: 'royalty-warning royalty-loss-warning' })}</label>`
+                  : `<label class="field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max })}</label>`).join('')}
+              </div>
+              <p class="field-note">The royalty can be set anywhere from 0% to ${MAX_ROYALTY_RATE * 100}%.</p>
+              <p id="royalty-warning" class="field-warning" role="status" ${royalty.belowResearch ? '' : 'hidden'}>${royalty.belowResearch ? html(royaltyWarning(royalty)) : ''}</p>
+              <p id="royalty-loss-warning" class="field-warning" role="status" data-before-royalty="${licensee.swissBeforeRoyalty}" data-royalty-base="${licensee.royaltyBase}" ${licensee.licenseeLoss ? '' : 'hidden'}>${licensee.licenseeLoss ? html(licenseeLossWarning({ ...licensee, royaltyRate: royalty.royaltyRate })) : ''}</p>
+            </div>
+          </section>
+          <section class="panel" aria-labelledby="floor-heading">
+            <div class="panel-header"><div><h2 id="floor-heading">Goods price floor</h2><p class="subtitle">A lower limit on every goods transfer price</p></div></div>
+            <div class="form-fields">
+              <label class="check-field"><input type="checkbox" name="priceFloor.enabled" ${priceFloor.enabled ? 'checked' : ''}> Never price goods below standard cost plus a markup</label>
+              <label class="field">Floor markup on standard cost (%)${numberInput('priceFloor.markup', percentInput(priceFloor.markup), { min: 0, max: 100 })}</label>
+              <p class="field-note">Standard cost is budget materials and conversion, plus the Polish toll fee on goods the Swiss principal sells. While the rule is on, starting prices, policy prices, prices you enter and year-end credits cannot take a price below the floor.</p>
+            </div>
+          </section>
+          <section class="panel" aria-labelledby="ranges-heading">
+            <div class="panel-header"><div><h2 id="ranges-heading">Arm’s-length ranges</h2><p class="subtitle">Full-year operating margins, as percentages</p></div></div>
+            <div class="form-fields">
+              <div class="field-pair">
+                ${rangeFields.map(([kind, bound, label]) => `<label class="field">${label}${numberInput(`range.${kind}.${bound}`, percentInput(ranges[kind][bound]), { min: 0, max: 100 })}</label>`).join('')}
+              </div>
+              <p class="field-note">A distributor is flagged only when its full-year margin leaves its range. Each range must contain the target margin above.</p>
             </div>
           </section>
           <section class="panel breakdown" aria-labelledby="royalty-heading">
@@ -680,6 +796,18 @@ function renderSettings() {
           </section>
         </div>
       </div>
+      <section class="panel" aria-labelledby="tax-settings-heading">
+        <div class="panel-header"><div><h2 id="tax-settings-heading">Income tax and customs duty</h2><p class="subtitle">Illustrative rates, as percentages</p></div></div>
+        <div class="form-fields">
+          <div class="rate-fields">
+            ${TAXED_ENTITIES.map((id) => `<label class="field">${html(labelFor(id))} income tax${numberInput(`tax.${id}`, percentInput(tax.rates[id]), { min: 0, max: 99 })}</label>`).join('')}
+          </div>
+          <div class="rate-fields">
+            ${CUSTOMS_ROUTES.map((route) => `<label class="field">${html(customsRouteLabel(route))} duty${numberInput(`duty.${route.key}`, percentInput(customs.rates[route.key]), { min: 0, max: 99 })}</label>`).join('')}
+          </div>
+          <p class="field-note">Income tax is each entity’s rate applied to its operating profit. Duty is charged on the declared transfer price of goods that cross a customs border and is reported as a memo. It is not deducted from operating profit.</p>
+        </div>
+      </section>
       <div id="scenario-message" aria-live="polite">${state.settingsMessage ? `<p class="form-message">${html(state.settingsMessage)}</p>` : ''}</div>
       <div class="panel form-footer">
         <p class="field-note">Applying a scenario recalculates all 12 months, resets the reveal sequence, and clears saved transfer prices.</p>
@@ -693,7 +821,7 @@ function readSettings(form) {
   const config = createConfig();
   const enteredTarget = data.get('annualOperatingMargin');
   const previousTarget = state.config.annualOperatingMargin ?? annualBudgetMargin(state.year.budget);
-  const displayedTarget = percentInput(previousTarget);
+  const displayedTarget = marginInput(previousTarget);
   config.annualOperatingMargin = enteredTarget === null || Number(enteredTarget) === displayedTarget
     ? previousTarget : Number(enteredTarget) / 100;
   config.rd.salesRate = Number(data.get('rd.salesRate')) / 100;
@@ -701,6 +829,11 @@ function readSettings(form) {
   config.simulation.seed = String(data.get('seed')).trim();
   for (const key of Object.keys(config.capacity)) config.capacity[key] = Number(data.get(`capacity.${key}`));
   for (const [key] of policyFields) config.policies[key] = Number(data.get(`policy.${key}`)) / 100;
+  for (const [kind, bound] of rangeFields) config.ranges[kind][bound] = Number(data.get(`range.${kind}.${bound}`)) / 100;
+  for (const key of MARKET_SHOCK_KEYS) config.simulation.marketVariation[key] = Number(data.get(`marketVariation.${key}`)) / 100;
+  for (const id of TAXED_ENTITIES) config.tax.rates[id] = Number(data.get(`tax.${id}`)) / 100;
+  for (const { key } of CUSTOMS_ROUTES) config.customs.rates[key] = Number(data.get(`duty.${key}`)) / 100;
+  config.priceFloor = { enabled: data.get('priceFloor.enabled') === 'on', markup: Number(data.get('priceFloor.markup')) / 100 };
   for (const key of SHOCK_KEYS) {
     for (const [bound] of distributionColumns) {
       config.simulation.distributions[key][bound] = Number(data.get(`shock.${key}.${bound}`)) / 100;
@@ -723,6 +856,7 @@ function applyScenario(config, message) {
   state.mapBasis = 'budget';
   state.settingsMessage = `${message} Full-year budget operating margin is ${formatPercent.format(annualBudgetMargin(year.budget))}.`;
   state.pricingMessage = '';
+  state.yearEndMessage = '';
   storeState();
   render();
 }
@@ -733,12 +867,17 @@ function render() {
     else button.removeAttribute('aria-current');
   }
   renderHeader();
+  if (state.view === 'brief') pageBody.innerHTML = renderBrief({ config: state.config, revealed: state.revealed });
   if (state.view === 'dashboard') renderDashboard();
   if (state.view === 'map') renderMap();
   if (state.view === 'pricing') {
-    const { effectiveMonth, routes, entityResults, openingPriceMethod } = reviewGoodsPricing(state.config, state.revealed);
+    const review = reviewGoodsPricing(state.config, state.revealed);
+    const budget = state.year.budget.reduce((year, { consolidated }) => ({
+      revenue: year.revenue + consolidated.revenue, operatingProfit: year.operatingProfit + consolidated.operatingProfit,
+    }), { revenue: 0, operatingProfit: 0 });
     pageBody.innerHTML = renderGoodsPricing({
-      revealed: state.revealed, effectiveMonth, routes, entityResults, openingPriceMethod, message: state.pricingMessage,
+      ...review, revealed: state.revealed, message: state.pricingMessage, yearEndMessage: state.yearEndMessage,
+      budget: { ...budget, operatingMargin: budget.operatingProfit / budget.revenue, ...summarizeTaxAndCustoms(state.config, state.year.budget) },
     });
   }
   if (state.view === 'settings') renderSettings();
@@ -773,7 +912,7 @@ for (const button of navButtons) {
   });
 }
 
-window.addEventListener('hashchange', () => setView(viewFromHash()));
+window.addEventListener('hashchange', () => setView(viewFromHash(), { focus: state.view === 'brief' }));
 window.addEventListener('resize', () => {
   if (state.view === 'map') drawMap();
 });
@@ -791,11 +930,13 @@ document.addEventListener('click', (event) => {
     state.revealed += 1;
     state.mapBasis = 'actual';
     state.pricingMessage = '';
+    state.yearEndMessage = '';
     storeState();
     announcement.textContent = `${months[state.period]} actuals revealed.`;
-  } else if (action === 'review-prices') {
-    location.hash = 'pricing';
-    setView('pricing', { focus: true });
+  } else if (action === 'review-prices' || action === 'start') {
+    const view = action === 'start' ? 'dashboard' : 'pricing';
+    location.hash = view;
+    setView(view, { focus: true });
     return;
   } else if (action === 'defaults') {
     applyScenario(createConfig(), 'Default scenario restored. All 12 months are ready to reveal.');
@@ -840,8 +981,35 @@ pageBody.addEventListener('change', (event) => {
   document.querySelector(selector).focus({ preventScroll: true });
 });
 
+// Flag the royalty as it is typed, before the scenario is applied. The rate is never blocked.
+function updateRoyaltyWarning(form) {
+  const royalty = form.elements['policy.royaltyRate'];
+  const research = form.elements['rd.salesRate'];
+  const belowResearch = royalty.value !== '' && research.value !== '' && royalty.valueAsNumber < research.valueAsNumber;
+  const warning = form.querySelector('#royalty-warning');
+  warning.hidden = !belowResearch;
+  warning.textContent = belowResearch
+    ? royaltyWarning({ royaltyRate: royalty.valueAsNumber / 100, researchRate: research.valueAsNumber / 100 }) : '';
+
+  // The licensee's budget profit falls in a straight line with the rate, so the typed
+  // rate can be projected from the applied scenario without rerunning the year.
+  const lossWarning = form.querySelector('#royalty-loss-warning');
+  const swissBeforeRoyalty = Number(lossWarning.dataset.beforeRoyalty);
+  const royaltyBase = Number(lossWarning.dataset.royaltyBase);
+  const royaltyRate = royalty.valueAsNumber / 100;
+  const swiss = swissBeforeRoyalty - royaltyRate * royaltyBase;
+  const licenseeLoss = royalty.value !== '' && Number.isFinite(swiss) && swiss <= -0.005;
+  lossWarning.hidden = !licenseeLoss;
+  lossWarning.textContent = licenseeLoss ? licenseeLossWarning({
+    royaltyRate, swiss, swissBeforeRoyalty, breakEvenRate: royaltyBase ? swissBeforeRoyalty / royaltyBase : null,
+  }) : '';
+  form.querySelector('#royalty-field').classList.toggle('field-flag', belowResearch || licenseeLoss);
+}
+
 pageBody.addEventListener('input', (event) => {
-  if (event.target.name !== 'rd.usShare' || !event.target.validity.valid) return;
+  const { name, form } = event.target;
+  if (name === 'policy.royaltyRate' || name === 'rd.salesRate') updateRoyaltyWarning(form);
+  if (name !== 'rd.usShare' || !event.target.validity.valid) return;
   document.querySelector('#rd-allocation').textContent = rdAllocationLabel(event.target.valueAsNumber / 100);
 });
 
@@ -865,6 +1033,25 @@ pageBody.addEventListener('submit', (event) => {
       document.querySelector('#goods-pricing-form button[type="submit"]').focus({ preventScroll: true });
     } catch (error) {
       document.querySelector('#goods-pricing-message').innerHTML = pricingStatus(error.message, true);
+    }
+    return;
+  }
+  if (form.id === 'year-end-form') {
+    event.preventDefault();
+    try {
+      const config = applyYearEndAdjustments(state.config, state.revealed, readYearEndChoices(form));
+      if (config !== state.config) {
+        state.year = runYear(config);
+        state.config = config;
+        state.yearEndMessage = 'Year-end adjustments posted to the December close.';
+        storeState();
+      } else {
+        state.yearEndMessage = 'The year-end adjustments are unchanged.';
+      }
+      render();
+      document.querySelector('#year-end-form button[type="submit"]').focus({ preventScroll: true });
+    } catch (error) {
+      document.querySelector('#year-end-message').innerHTML = pricingStatus(error.message, true);
     }
     return;
   }
