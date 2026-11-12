@@ -1,0 +1,54 @@
+/* Opening sequence. It shows only when the gate in index.html adds .intro-on before first paint. */
+.intro { display: none; }
+.intro-on .intro {
+  /* The monogram's width. Its height is .7352 of this, the gap under it .1 and the name .21. */
+  --logo: min(400px, 58vw, 44vh);
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: block;
+  overflow: hidden;
+}
+/* The whole screen starts as the logo's own tile, then closes down onto the brand mark. */
+.intro-tile { position: absolute; inset: 0; background: #c1daf8; }
+.intro-logo {
+  position: absolute;
+  top: calc(50% - var(--logo) * .5226);
+  left: calc(50% - var(--logo) / 2);
+  display: block;
+  width: var(--logo);
+  height: auto;
+  overflow: visible;
+  transform-origin: 0 0;
+}
+.intro-bar { opacity: 0; transform-box: fill-box; transform-origin: center; }
+.intro-line { position: absolute; top: calc(50% + var(--logo) * .3126); right: 0; left: 0; display: flex; justify-content: center; }
+.intro-word {
+  margin: 0;
+  font-size: calc(var(--logo) * .21);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.035em;
+  white-space: nowrap;
+  transform-origin: 0 0;
+}
+.intro-word-dark { color: var(--navy); opacity: 0; }
+.intro-word-light { color: #fff; }
+.intro-skip {
+  position: absolute;
+  right: 22px;
+  bottom: 22px;
+  min-height: 36px;
+  padding: 7px 14px;
+  border: 1px solid rgba(39, 52, 88, .2);
+  border-radius: 8px;
+  color: var(--navy);
+  background: rgba(255, 255, 255, .72);
+  font-size: 13px;
+  font-weight: 650;
+}
+.intro-skip:hover { background: #fff; }
+/* The real name in the corner stays out of sight until the travelling one lands on it. Its tagline follows. */
+.intro-on .brand-wordmark strong { visibility: hidden; }
+.brand-wordmark span { transition: opacity .35s ease-out; }
+.intro-on .brand-wordmark span { opacity: 0; transition: none; }

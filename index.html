@@ -10,8 +10,46 @@
   <link rel="stylesheet" href="./src/styles.css">
   <link rel="stylesheet" href="./src/pricing.css">
   <link rel="stylesheet" href="./src/training.css">
+  <link rel="stylesheet" href="./src/intro.css">
+  <script>
+    // Decide before first paint whether the opening sequence plays, so the page never shows ahead of it.
+    // It plays once per browser session and not at all when reduced motion is requested. ?intro replays it.
+    (function () {
+      try {
+        if (!/[?&]intro(=|&|$)/.test(location.search)) {
+          if (matchMedia('(prefers-reduced-motion: reduce)').matches || sessionStorage.getItem('playtp-intro-seen')) return;
+        }
+        sessionStorage.setItem('playtp-intro-seen', '1');
+      } catch (error) { /* Storage is blocked: play it anyway. */ }
+      document.documentElement.classList.add('intro-on');
+      // If the sequence never starts or stalls, the page still appears.
+      setTimeout(function () { document.documentElement.classList.remove('intro-on'); }, 9000);
+    })();
+  </script>
 </head>
 <body>
+  <div class="intro" id="intro">
+    <!-- The name is drawn twice: light under the tile, dark on it. The tile's edge switches between them. -->
+    <div class="intro-line" aria-hidden="true"><p class="intro-word intro-word-light">PlayTP</p></div>
+    <div class="intro-tile">
+      <div class="intro-line" aria-hidden="true"><p class="intro-word intro-word-dark">PlayTP</p></div>
+    </div>
+    <svg class="intro-logo" viewBox="248 343 759 558" width="759" height="558" aria-hidden="true" focusable="false">
+      <defs>
+        <linearGradient id="intro-steel" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="1" gradientTransform="translate(248 343) scale(597 558)">
+          <stop stop-color="#587caa"/><stop offset="1" stop-color="#42628c"/>
+        </linearGradient>
+        <linearGradient id="intro-navy" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="1" gradientTransform="translate(598 343) scale(409 558)">
+          <stop stop-color="#2e4268"/><stop offset="1" stop-color="#233351"/>
+        </linearGradient>
+      </defs>
+      <path class="intro-bar" data-bar="t-cap" fill="url(#intro-steel)" d="M248 343H845L744 442H248Z"/>
+      <path class="intro-bar" data-bar="t-stem" fill="url(#intro-steel)" d="M452 442H577V901H452Z"/>
+      <path class="intro-bar" data-bar="h-crossbar" fill="url(#intro-navy)" d="M598 557H868V666H598Z"/>
+      <path class="intro-bar" data-bar="h-upright" fill="url(#intro-navy)" d="M868 343H1007V901H868Z"/>
+    </svg>
+    <button class="intro-skip" type="button">Skip intro</button>
+  </div>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Application navigation">
       <a class="brand" href="#dashboard" aria-label="PlayTP dashboard">
@@ -42,6 +80,7 @@
   <dialog id="year-summary" class="summary-dialog" aria-labelledby="year-summary-title"></dialog>
   <div id="announcement" role="status" class="visually-hidden" aria-live="polite"></div>
   <noscript>This simulation needs JavaScript enabled.</noscript>
+  <script type="module" src="./src/intro.mjs"></script>
   <script type="module" src="./src/main.mjs"></script>
 </body>
 </html>
