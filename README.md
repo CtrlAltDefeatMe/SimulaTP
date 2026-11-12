@@ -1,6 +1,6 @@
-# SimulaTP
+# PlayTP
 
-SimulaTP is a browser-based transfer pricing simulator for 2027. Read the case brief, review the budget, reveal monthly actuals, and use the quarterly pricing reviews and the year-end adjustment to keep each distributor inside its arm's-length range.
+PlayTP is a browser-based transfer pricing simulator for 2027. Read the case brief, review the budget, reveal monthly actuals, and use the quarterly pricing reviews and the year-end adjustment to keep each distributor inside its arm's-length range.
 
 The simulator uses a synthetic scenario. Tax and duty rates are illustrative. Scenario settings, reveal progress, and price changes are stored in your browser.
 

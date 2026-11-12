@@ -12,9 +12,11 @@ const total = (months, key) => months.reduce((sum, month) => sum + month.consoli
 const distributors = ['DE', 'FR', 'UK', 'APAC', 'CA']
 const policyRows = review => Object.fromEntries(review.entityResults.filter(row => distributors.includes(row.id)).map(row => [row.id, row.policy]))
 
-// A scenario as saved before R&D, market variation and the tax layers were added.
+// A scenario as saved before R&D, market variation and the tax layers were added,
+// when the game was called SimulaTP and that name was its default seed.
 function legacyConfig() {
   const config = createConfig()
+  config.simulation.seed = 'SimulaTP-2027'
   config.rd.salesRate = 0
   config.annualOperatingMargin = 4_017_544.4704 / 10_487_570
   config.simulation.marketVariation = { demand: 0, salesPrice: 0 }
@@ -38,7 +40,10 @@ test('group-wide shocks for a seed do not depend on the market list', () => {
   const plain = simulateShocks(DEFAULT_SIMULATION, 12)
   const withMarkets = simulateShocks(DEFAULT_SIMULATION, 12, ['US', 'DE'])
   assert.deepEqual(Object.keys(plain[0]), ['demand', 'salesPrice', 'materialCost'])
-  assert.ok(Math.abs(plain[0].demand - -0.053929718847250896) < 1e-15)
+  // The same seed always gives the same year.
+  assert.deepEqual(simulateShocks(DEFAULT_SIMULATION, 12), plain)
+  const earlier = simulateShocks({ ...DEFAULT_SIMULATION, seed: 'SimulaTP-2027' }, 1)
+  assert.ok(Math.abs(earlier[0].demand - -0.053929718847250896) < 1e-15)
   for (const [index, month] of plain.entries()) {
     for (const key of ['demand', 'salesPrice', 'materialCost']) assert.equal(withMarkets[index][key], month[key])
   }
@@ -152,7 +157,8 @@ test('a distributor is flagged only when its forecast leaves the range', () => {
     assert.equal(policy.outOfPolicy, !inside, id)
     assert.equal(policy.exposure > 0, !inside, id)
   }
-  assert.equal(policies.UK.status, 'above')
+  // In the default year France finishes below its range and Germany stays inside.
+  assert.equal(policies.FR.status, 'below')
   assert.equal(policies.DE.status, 'within')
 })
 
@@ -178,19 +184,28 @@ test('year-end adjustments to target move each distributor onto its target and l
   assert.ok(entries.every(entry => entry.quantity === 0))
   // An upward adjustment on a dutiable route adds duty. A credit earns no refund.
   const duty = months => summarizeTaxAndCustoms(adjusted, months).customs.routes
-  const asia = entries.find(entry => entry.to === 'APAC').amount
-  assert.ok(asia > 0)
-  assert.ok(Math.abs(duty(after.actual)['CH-APAC'].duty - duty(before.actual)['CH-APAC'].duty - 0.05 * asia) < 0.005)
+  for (const entry of entries) {
+    const key = entry.from + '-' + entry.to
+    if (!(key in adjusted.customs.rates)) continue // Shipments to Germany and France stay inside the EU.
+    const added = duty(after.actual)[key].duty - duty(before.actual)[key].duty
+    assert.ok(Math.abs(added - adjusted.customs.rates[key] * Math.max(0, entry.amount)) < 0.005, key)
+  }
+  assert.ok(entries.some(entry => entry.amount < 0))
 })
 
 test('year-end adjustments to the range touch only distributors outside it', () => {
   const config = createConfig()
   const adjusted = applyYearEndAdjustments(config, 12, Object.fromEntries(distributors.map(id => [id, 'range'])))
   const review = reviewGoodsPricing(adjusted, 12)
-  const moved = review.yearEnd.filter(entry => entry.amount !== 0).map(entry => entry.id)
-  assert.deepEqual(moved, ['UK'])
-  assert.equal(policyRows(review).UK.status, 'within')
-  assert.equal(Math.round(policyRows(review).UK.forecast * 10_000), 450)
+  const outside = review.yearEnd.filter(entry => entry.statusBefore !== 'within')
+  assert.ok(outside.length > 0 && outside.length < distributors.length)
+  assert.deepEqual(review.yearEnd.filter(entry => entry.amount !== 0).map(entry => entry.id), outside.map(entry => entry.id))
+  for (const entry of outside) {
+    const policy = policyRows(review)[entry.id]
+    const edge = entry.statusBefore === 'below' ? policy.low : policy.high
+    assert.equal(policy.status, 'within', entry.id)
+    assert.equal(Math.round(policy.forecast * 10_000), Math.round(edge * 10_000), entry.id)
+  }
 })
 
 test('year-end adjustments stay closed until December is revealed', () => {

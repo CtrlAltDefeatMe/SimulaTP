@@ -11,7 +11,9 @@ import { licenseeLossWarning, readYearEndChoices, royaltyWarning } from './year-
 
 const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const storageKey = 'simulatp-2027-v1';
+const storageKey = 'playtp-2027-v1';
+// Scenarios saved under the game's earlier name, SimulaTP, are still picked up.
+const legacyStorageKey = 'simulatp-2027-v1';
 const pageHeader = document.querySelector('#page-header');
 const pageBody = document.querySelector('#page-body');
 const announcement = document.querySelector('#announcement');
@@ -73,7 +75,7 @@ function productFor(id) {
 function loadState() {
   const defaults = createConfig();
   try {
-    const saved = JSON.parse(localStorage.getItem(storageKey));
+    const saved = JSON.parse(localStorage.getItem(storageKey) ?? localStorage.getItem(legacyStorageKey));
     if (saved?.config && Number.isInteger(saved.revealed) && saved.revealed >= 0 && saved.revealed <= 12) {
       const { revealed } = saved;
       const unstarted = revealed === 0 && !saved.config.goodsPriceSchedule?.length;
@@ -131,7 +133,7 @@ function renderHeader() {
       <h1 id="page-title" tabindex="-1">${views[state.view]}</h1>
     </div>
     ${state.view === 'dashboard' ? `<div class="view-controls">${reviewButton}${revealButton()}</div>` : ''}`;
-  document.title = `SimulaTP · ${views[state.view]}`;
+  document.title = `PlayTP · ${views[state.view]}`;
 }
 
 function monthStrip() {
