@@ -1,10 +1,12 @@
 import { ENTITIES, POLICY_LABELS, PRODUCTS } from './engine.mjs';
+import { allocationPanel, renderYearEnd } from './year-end-view.mjs';
 
 const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const compactPercent = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 4 });
 const monthNames = new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' });
 const reviewMonths = [3, 6, 9];
+const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range', off: 'Out of policy' };
 const resultColumns = [
   ['revenue', 'Net sales', dollars],
   ['rdExpense', 'R&D expense', dollars],
@@ -103,11 +105,21 @@ function entityResultsPanel(revealed, rows, routes) {
   const resultCells = (result, policy, isForecast = false) => resultColumns.map(([key, , formatter], index) => {
     let policyDetails = '';
     if (key === 'operatingMargin' && Number.isFinite(policy?.target)) {
-      const comparable = Number.isFinite(policy.forecast) && format(policy.forecast, percent) !== format(result?.[key], percent)
-        ? `${html(policy.label || 'Policy margin')} ${percent.format(policy.forecast)} · `
-        : '';
-      policyDetails = `<small class="pricing-margin-target">${comparable}Target ${percent.format(policy.target)}</small>`;
-      if (isForecast && policy.outOfPolicy) policyDetails += '<small class="pricing-policy-status">Out of policy</small>';
+      // One short line each, so the margin column stays narrow.
+      const detail = text => `<small class="pricing-margin-target">${text}</small>`;
+      if (Number.isFinite(policy.forecast) && format(policy.forecast, percent) !== format(result?.[key], percent)) {
+        policyDetails += detail(`${html(policy.label || 'Policy margin')} ${percent.format(policy.forecast)}`);
+      }
+      if (Number.isFinite(policy.low) && policy.low !== policy.high) {
+        policyDetails += detail(`Range ${percent.format(policy.low)}–${percent.format(policy.high)}`);
+      }
+      policyDetails += detail(`Target ${percent.format(policy.target)}`);
+      if (policy.outOfPolicy) {
+        policyDetails += `<small class="pricing-policy-status">${statusLabels[policy.status] ?? statusLabels.off}</small>`;
+        if (policy.exposure > 0) policyDetails += `<small class="pricing-policy-status">Tax at risk ${dollars.format(policy.exposure)}</small>`;
+      } else if (policy.status === 'within' && Number.isFinite(policy.low) && Number.isFinite(policy.forecast)) {
+        policyDetails += `<small class="pricing-policy-ok">${statusLabels.within}</small>`;
+      }
     }
     const forecastClasses = index === 0 ? 'pricing-forecast-value pricing-forecast-first' : 'pricing-forecast-value';
     return `<td${isForecast ? ` class="${forecastClasses}"` : ''}>${format(result?.[key], formatter)}${policyDetails}</td>`;
@@ -127,7 +139,7 @@ function entityResultsPanel(revealed, rows, routes) {
       <tbody>${rows.map(({ id, ytd, fullYear, policy }) => {
         const comparison = policy ?? { target: targets.get(id) };
         const rowClass = id === 'consolidated' ? 'pricing-total' : '';
-        const statusClass = showForecast && comparison.outOfPolicy ? 'pricing-out-of-policy' : '';
+        const statusClass = comparison.outOfPolicy ? 'pricing-out-of-policy' : '';
         return `<tr class="${[rowClass, statusClass].filter(Boolean).join(' ')}">
           <th scope="row" class="table-name">${html(entityName(id))}</th>
           ${resultCells(revealed ? ytd : null, showForecast ? undefined : comparison)}${showForecast ? resultCells(fullYear, comparison, true) : ''}
@@ -158,10 +170,13 @@ export function pricingStatus(message, error = false) {
     : `<p class="form-message" role="status">${html(message)}</p>`;
 }
 
-export function renderGoodsPricing({ revealed, effectiveMonth, routes, message, entityResults, openingPriceMethod }) {
+export function renderGoodsPricing(review) {
+  const { revealed, effectiveMonth, routes, message, entityResults, openingPriceMethod } = review;
   const editing = reviewMonths.includes(revealed) && effectiveMonth === revealed + 1;
   const nextReview = reviewMonths.find(month => month > revealed);
-  const results = entityResultsPanel(revealed, entityResults, routes);
+  const yearEnd = revealed === 12 && review.yearEnd
+    ? renderYearEnd({ ...review, message: review.yearEndMessage }) : '';
+  const results = `${yearEnd}${entityResultsPanel(revealed, entityResults, routes)}${allocationPanel(review)}`;
   const assumptions = openingInventoryPanel(routes, openingPriceMethod);
   const prices = pricingTable(routes, editing);
   if (!editing) return `${results}${assumptions}
