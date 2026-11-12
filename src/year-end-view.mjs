@@ -11,6 +11,13 @@ function html(value) {
   return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
+const rate = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 2 });
+
+/** The message shown wherever the royalty rate is below R&D as a share of consolidated sales. */
+export function royaltyWarning({ royaltyRate, researchRate }) {
+  return `The royalty rate of ${rate.format(royaltyRate)} is less than R&D spend of ${rate.format(researchRate)} of consolidated sales. This can be a sign that the royalty is too low.`;
+}
+
 function entityName(id) {
   return ENTITIES[id]?.name ?? id;
 }
@@ -99,7 +106,8 @@ function adjustmentForm({ yearEnd, message }) {
 }
 
 /** Where operating profit lands, with the tax and duty that follow from it. */
-export function allocationPanel({ allocation, fullYear, revealed }) {
+export function allocationPanel({ allocation, fullYear, revealed, royalty }) {
+  const flagged = royalty?.belowResearch;
   const basis = revealed >= 12 ? 'Full-year actuals' : revealed ? 'Full-year forecast at current prices' : 'Full-year budget';
   const part = (label, value, note) => `<li><span>${html(label)}${note ? `<small>${html(note)}</small>` : ''}</span><strong>${wholeDollars.format(value)} · ${share.format(allocation.total ? value / allocation.total : 0)}</strong></li>`;
   return `<section class="panel breakdown" aria-labelledby="allocation-heading">
@@ -111,12 +119,13 @@ export function allocationPanel({ allocation, fullYear, revealed }) {
         ${part('All other entities', allocation.routine, 'Routine returns')}
       </ul>
       <ul class="detail-list">
-        <li><span>Royalty paid to the United States</span><strong>${wholeDollars.format(allocation.royalty)}</strong></li>
+        <li${flagged ? ' class="flagged"' : ''}><span>Royalty paid to the United States${royalty ? `<small>${rate.format(royalty.royaltyRate)} royalty · R&amp;D ${rate.format(royalty.researchRate)} of consolidated sales</small>` : ''}</span><strong>${wholeDollars.format(allocation.royalty)}</strong></li>
         <li><span>Royalty as a share of Swiss profit before royalty</span><strong>${share.format(allocation.royaltyShare)}</strong></li>
         <li><span>Group income tax<small>${percent.format(fullYear.tax.effectiveRate)} effective rate on entity profit</small></span><strong>${wholeDollars.format(fullYear.tax.total)}</strong></li>
         <li><span>Customs duty on declared transfer prices<small>Memo. Not deducted from operating profit</small></span><strong>${wholeDollars.format(fullYear.customs.total)}</strong></li>
       </ul>
     </div>
+    ${flagged ? `<p class="field-warning panel-note">${html(royaltyWarning(royalty))}</p>` : ''}
   </section>`;
 }
 

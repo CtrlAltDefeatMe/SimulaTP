@@ -69,6 +69,7 @@ const DEFAULT_TAX_RATES = { US: 0.25, CH: 0.15, PL: 0.19, BE: 0.25, DE: 0.30, FR
 // Shipments from the Belgian warehouse to Germany and France stay inside the EU.
 const DEFAULT_DUTY_RATES = { 'US-CH': 0.03, 'CH-US': 0.10, 'CH-UK': 0, 'CH-APAC': 0.05, 'US-CA': 0 }
 export const YEAR_END_MODES = ['none', 'range', 'target']
+export const MAX_ROYALTY_RATE = 0.5
 const HISTORICAL_OPENING_POLICIES = { lrdMargin: 0.03, ffdMargin: 0.075, polandMarkup: 0.08 }
 const sourceOf = id => id === 'CA' ? 'US' : 'CH'
 const goodsRouteKey = (from, to) => from + '-' + to
@@ -207,6 +208,7 @@ function validateConfig(config) {
       throw new RangeError(`${key} must be between 0% and ${isMargin ? 'less than 100%' : '100%'}.`)
     }
   }
+  if (config.policies.royaltyRate > MAX_ROYALTY_RATE) throw new RangeError('The royalty rate must be between 0% and 50%.')
   for (const [kind, label] of [['lrd', 'LRD'], ['ffd', 'FFD']]) {
     if (config.ranges === undefined) continue
     const { low, high } = config.ranges[kind] ?? {}
@@ -885,6 +887,16 @@ function summarizeEntityResults(actual, forecast, config) {
   }, ...rows]
 }
 
+/**
+ * Compare the royalty rate with R&D as a share of consolidated sales. A royalty
+ * below the R&D share can be a sign that it is too low. It is a prompt, not a limit.
+ */
+export function royaltyCheck(config) {
+  const royaltyRate = config.policies.royaltyRate
+  const researchRate = config.rd?.salesRate ?? 0
+  return { royaltyRate, researchRate, belowResearch: royaltyRate < researchRate }
+}
+
 // Where the group's operating profit lands, and how much of the Swiss residual the royalty moves.
 function profitAllocation(months) {
   const profit = id => sum(months.map(month => month.entities[id].operatingProfit))
@@ -980,7 +992,7 @@ export function reviewGoodsPricing(config, revealed) {
   const fullYear = [...actual, ...forecast]
   return {
     effectiveMonth, routes, entityResults, actual, forecast, openingPriceMethod,
-    allocation: profitAllocation(fullYear), fullYear: summarizeTaxAndCustoms(config, fullYear),
+    allocation: profitAllocation(fullYear), royalty: royaltyCheck(config), fullYear: summarizeTaxAndCustoms(config, fullYear),
     yearEnd: actual[11]?.yearEnd ?? null, priceRevisions: config.goodsPriceSchedule?.length ?? 0,
   }
 }

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyYearEndAdjustments, createConfig, reviewGoodsPricing, runYear, summarizeTaxAndCustoms, upgradeConfig,
+  applyYearEndAdjustments, createConfig, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, upgradeConfig,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks } from '../src/simulation.mjs'
 
@@ -133,4 +133,19 @@ test('a scenario saved before these settings existed still runs and keeps its re
   const wide = upgradeConfig({ ...structuredClone(saved), policies: { ...saved.policies, lrdMargin: 0.06 } }, true)
   assert.equal(wide.ranges.lrd.high, 0.06)
   runYear(wide)
+})
+
+test('the royalty can be set from 0% to 50% and is flagged when it is below the R&D share of sales', () => {
+  const config = createConfig()
+  for (const royaltyRate of [0, 0.5]) {
+    const year = runYear({ ...config, policies: { ...config.policies, royaltyRate } })
+    assert.ok(year.variance.every(month => Math.abs(month.check) < 0.005))
+  }
+  assert.throws(() => runYear({ ...config, policies: { ...config.policies, royaltyRate: 0.51 } }), /0% and 50%/)
+  // The default 5% royalty covers the default 4% R&D share. Equal rates are not flagged.
+  assert.equal(royaltyCheck(config).belowResearch, false)
+  assert.equal(royaltyCheck({ ...config, policies: { ...config.policies, royaltyRate: 0.04 } }).belowResearch, false)
+  const low = { ...config, policies: { ...config.policies, royaltyRate: 0.03 } }
+  assert.deepEqual(royaltyCheck(low), { royaltyRate: 0.03, researchRate: 0.04, belowResearch: true })
+  assert.equal(reviewGoodsPricing(low, 0).royalty.belowResearch, true)
 })

@@ -33,6 +33,12 @@
 #year-end-message:not(:empty) { flex: 1 1 260px; }
 #year-end-message p { margin: 0; }
 
+/* A value the learner may set but should question. Color is backed by a message. */
+label.field.field-flag, .field-flag input { color: var(--negative); }
+.field-flag input { border-color: #d99aa0; font-weight: 650; }
+.field-warning { color: var(--negative); font-size: 12px; font-weight: 600; line-height: 1.5; }
+.detail-list li.flagged span, .detail-list li.flagged strong { color: var(--negative); }
+
 /* Profit allocation, tax and customs */
 .allocation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
 .detail-list li span small { display: block; margin-top: 2px; font-size: 11px; }

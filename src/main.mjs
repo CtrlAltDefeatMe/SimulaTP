@@ -1,12 +1,12 @@
 import {
-  applyGoodsPrices, applyYearEndAdjustments, createConfig, CUSTOMS_ROUTES, ENTITIES, POLICY_LABELS, PRODUCTS, quarterPricingMonth,
-  reviewGoodsPricing, runYear, summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
+  applyGoodsPrices, applyYearEndAdjustments, createConfig, CUSTOMS_ROUTES, ENTITIES, MAX_ROYALTY_RATE, POLICY_LABELS, PRODUCTS,
+  quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
 } from './engine.mjs';
 import { renderBrief } from './brief-view.mjs';
 import { landPolygons } from './land.mjs';
 import { pricingStatus, readGoodsPriceOverrides, renderGoodsPricing, useGoodsPriceQuote } from './pricing-view.mjs';
 import { MARKET_SHOCK_KEYS, SHOCK_KEYS } from './simulation.mjs';
-import { readYearEndChoices } from './year-end-view.mjs';
+import { readYearEndChoices, royaltyWarning } from './year-end-view.mjs';
 
 const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -639,7 +639,7 @@ const policyFields = [
   ['belgiumMargin', 'Belgium warehouse target operating margin'],
   ['usServicesMarkup', 'US headquarters services markup'],
   ['indiaServicesMarkup', 'India shared services markup'],
-  ['royaltyRate', 'Swiss royalty to US, share of covered sales'],
+  ['royaltyRate', 'Swiss royalty to US, share of covered sales', MAX_ROYALTY_RATE * 100],
   ['usToSwissMarkup', 'US → Swiss cross-supply markup'],
   ['swissToUsMarkup', 'Swiss → US cross-supply markup'],
 ];
@@ -652,8 +652,8 @@ const marketVariationLabels = { demand: 'Demand variation by market (±%)', sale
 const correlationPairs = [[0, 1], [0, 2], [1, 2]];
 const distributionColumns = [['min', 'Minimum'], ['mode', 'Most likely'], ['max', 'Maximum']];
 
-function numberInput(name, value, { min, max, step = 'any', label, disabled = false } = {}) {
-  return `<input type="number" name="${name}" value="${html(value)}" step="${step}" ${min === undefined ? '' : `min="${min}"`} ${max === undefined ? '' : `max="${max}"`} ${label ? `aria-label="${html(label)}"` : ''} ${disabled ? 'disabled' : 'required'}>`;
+function numberInput(name, value, { min, max, step = 'any', label, describedBy, disabled = false } = {}) {
+  return `<input type="number" name="${name}" value="${html(value)}" step="${step}" ${min === undefined ? '' : `min="${min}"`} ${max === undefined ? '' : `max="${max}"`} ${label ? `aria-label="${html(label)}"` : ''} ${describedBy ? `aria-describedby="${describedBy}"` : ''} ${disabled ? 'disabled' : 'required'}>`;
 }
 
 function percentInput(value) {
@@ -685,6 +685,7 @@ function renderSettings() {
     tax = defaults.tax, customs = defaults.customs,
   } = state.config;
   const marketVariation = simulation.marketVariation ?? { demand: 0, salesPrice: 0 };
+  const royalty = royaltyCheck(state.config);
   const marginLocked = state.revealed > 0;
   const target = annualOperatingMargin ?? annualBudgetMargin(state.year.budget);
   pageBody.innerHTML = `
@@ -739,8 +740,14 @@ function renderSettings() {
           </section>
           <section class="panel" aria-labelledby="pricing-heading">
             <div class="panel-header"><div><h2 id="pricing-heading">Transfer pricing policies</h2><p class="subtitle">Targets and markups as percentages</p></div></div>
-            <div class="form-fields field-pair">
-              ${policyFields.map(([key, label]) => `<label class="field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max: 100 })}</label>`).join('')}
+            <div class="form-fields">
+              <div class="field-pair">
+                ${policyFields.map(([key, label, max = 100]) => key === 'royaltyRate'
+                  ? `<label class="field ${royalty.belowResearch ? 'field-flag' : ''}" id="royalty-field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max, describedBy: 'royalty-warning' })}</label>`
+                  : `<label class="field">${label}${numberInput(`policy.${key}`, percentInput(policies[key]), { min: 0, max })}</label>`).join('')}
+              </div>
+              <p class="field-note">The royalty can be set anywhere from 0% to ${MAX_ROYALTY_RATE * 100}%.</p>
+              <p id="royalty-warning" class="field-warning" role="status" ${royalty.belowResearch ? '' : 'hidden'}>${royalty.belowResearch ? html(royaltyWarning(royalty)) : ''}</p>
             </div>
           </section>
           <section class="panel" aria-labelledby="ranges-heading">
@@ -941,8 +948,22 @@ pageBody.addEventListener('change', (event) => {
   document.querySelector(selector).focus({ preventScroll: true });
 });
 
+// Flag the royalty as it is typed, before the scenario is applied. The rate is never blocked.
+function updateRoyaltyWarning(form) {
+  const royalty = form.elements['policy.royaltyRate'];
+  const research = form.elements['rd.salesRate'];
+  const belowResearch = royalty.value !== '' && research.value !== '' && royalty.valueAsNumber < research.valueAsNumber;
+  const warning = form.querySelector('#royalty-warning');
+  form.querySelector('#royalty-field').classList.toggle('field-flag', belowResearch);
+  warning.hidden = !belowResearch;
+  warning.textContent = belowResearch
+    ? royaltyWarning({ royaltyRate: royalty.valueAsNumber / 100, researchRate: research.valueAsNumber / 100 }) : '';
+}
+
 pageBody.addEventListener('input', (event) => {
-  if (event.target.name !== 'rd.usShare' || !event.target.validity.valid) return;
+  const { name, form } = event.target;
+  if (name === 'policy.royaltyRate' || name === 'rd.salesRate') updateRoyaltyWarning(form);
+  if (name !== 'rd.usShare' || !event.target.validity.valid) return;
   document.querySelector('#rd-allocation').textContent = rdAllocationLabel(event.target.valueAsNumber / 100);
 });
 
