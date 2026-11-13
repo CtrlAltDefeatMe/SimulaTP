@@ -433,7 +433,9 @@ export function buildTaxRows({ budget, actual }) {
   return rows;
 }
 
-function rowHtml(row, span = 7) {
+// `span` is the table's column count: 7 for the report, 3 for the US tax table. It is an option, so a
+// stray second argument, such as an index from Array.map, cannot change it.
+function rowHtml(row, { span = 7 } = {}) {
   // The text of a full-width row stays in view when a narrow screen scrolls the table sideways.
   if (row.type === 'heading') return `<tr class="entity-heading"><th scope="colgroup" colspan="${span}"><span class="entity-stick">${html(row.text)}</span></th></tr>`;
   if (row.type === 'sub') return `<tr class="entity-sub"><th scope="colgroup" colspan="${span}"><span class="entity-stick">${html(row.text)}</span></th></tr>`;
@@ -512,7 +514,7 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
           <tr><th scope="col" rowspan="2">Line</th><th scope="colgroup" colspan="3">${html(budgetLabel)}</th><th scope="colgroup" colspan="3" class="entity-actual">${html(actualLabel)}</th></tr>
           <tr><th scope="col">Units, thousands</th><th scope="col">Per unit, USD</th><th scope="col">Amount, ${IN_THOUSANDS}</th><th scope="col" class="entity-actual">Units, thousands</th><th scope="col">Per unit, USD</th><th scope="col">Amount, ${IN_THOUSANDS}</th></tr>
         </thead>
-        <tbody>${buildRows(detail, layers).map(rowHtml).join('')}</tbody>
+        <tbody>${buildRows(detail, layers).map(row => rowHtml(row)).join('')}</tbody>
       </table></div>
       <p class="field-note panel-note">Units are in thousands and amounts in ${IN_THOUSANDS}, so the value per unit is in dollars. Each goods line is units times the value per unit. Net sales use the net sales price. Cost of sales and inventory use the value the units are carried at in stock, first in, first out: the oldest layer is sold first. ${layers
         ? 'A layer is the units that came in at one value. For a distributor that is a quarter’s purchases at that quarter’s transfer price plus any customs duty. The plants’ cost moves every month, so their layers are by month. A product line’s value per unit is the average of its layers.'
@@ -523,7 +525,7 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
         <p class="subtitle">${when} · ${IN_THOUSANDS} · taxable income, FDDEI, NCTI and BEAT</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="tax-heading"><table class="entity-table entity-tax-table">
         <thead><tr><th scope="col">Line</th><th scope="col">${html(budgetLabel)}</th><th scope="col" class="entity-actual">${html(actualLabel)}</th></tr></thead>
-        <tbody>${taxRows.map(row => rowHtml(row, 3)).join('')}</tbody>
+        <tbody>${taxRows.map(row => rowHtml(row, { span: 3 })).join('')}</tbody>
       </table></div>
     </section>` : ''}`;
 }
