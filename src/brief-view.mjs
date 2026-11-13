@@ -76,7 +76,7 @@ export function renderBrief({ config, revealed }) {
       <section class="panel" aria-labelledby="brief-year-heading">
         <div class="panel-header"><h2 id="brief-year-heading">How the year runs</h2></div>
         <ol class="brief-steps">
-          <li>Read the budget on the <a href="#dashboard">Dashboard</a> and trace the flows on the <a href="#map">Transaction map</a>.</li>
+          <li>Read the budget on the <a href="#dashboard">Dashboard</a> and trace the flows on the <a href="#map">Transaction map</a>. <a href="#entities">Entity detail</a> breaks each company down into units, prices, fees and stock.</li>
           <li>Reveal actuals one month at a time. The variance bridge explains each month’s gap to budget.</li>
           <li>After the March, June and September closes, open <a href="#pricing">Transfer prices</a>. The forecast shows where each tested entity will finish the year at current prices and fees. Take the policy price or fee, enter your own, or leave them alone.</li>
           <li>New prices apply to new shipments only. Each distributor holds about two months of stock, which keeps its old cost and is sold first, so a price change takes about two months to reach its cost of sales.</li>

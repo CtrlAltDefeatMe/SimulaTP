@@ -543,7 +543,10 @@ class Ledger {
 
   transfer({ from, to, category, policy, product = null, quantity = 0, amount, buyerAccount, basis = null, external = false, origins = null }) {
     const id = `T${this.month}-${++this.sequence}`
-    this.transactions.push({ id, from, to, category, policy, product, quantity, amount, basis, external, ...(origins ? { origins } : {}) })
+    this.transactions.push({
+      id, from, to, category, policy, product, quantity, amount, basis, external,
+      ...(buyerAccount ? { account: buyerAccount } : {}), ...(origins ? { origins } : {}),
+    })
     const revenueAccount = policy === 'RD_SERVICES' ? 'intercompanyRDRevenue' : {
       goods: 'intercompanyGoodsRevenue', services: 'intercompanyServicesRevenue', royalty: 'intercompanyRoyaltyRevenue',
     }[category]
@@ -1400,6 +1403,156 @@ function distributorQuote(config, route, forecast, fullYear, startMonth, current
     ? 'The full-year target is out of reach at any nonnegative price because of costs already incurred or carried in.'
     : floorNote([...held], short)
   return { recommended, note, held: [...held], short: costAllowance < 0 || short }
+}
+
+// Units and carrying value of one entity's stock, by stage and product. `key` picks the
+// opening or the closing lots of each bin.
+function stockOf(inventory, id, key) {
+  const rows = new Map()
+  for (const bin of inventory) {
+    if (bin.owner !== id) continue
+    const name = bin.stage + '/' + bin.product
+    const row = rows.get(name) ?? { stage: bin.stage, product: bin.product, units: 0, amount: 0 }
+    for (const lot of bin[key]) {
+      row.units += lot.quantity
+      row.amount += lot.quantity * lot.unitValue
+    }
+    rows.set(name, row)
+  }
+  const order = { finished: 0, wip: 1, raw: 2 }
+  return [...rows.values()].sort((left, right) => order[left.stage] - order[right.stage] || left.product.localeCompare(right.product))
+}
+
+// The line detail behind one entity's results for a set of closed months.
+function entityLines(config, id, months, budgetServiceCost) {
+  const results = rollupPnl(months.map(month => month.entities[id]))
+  const byProduct = () => Object.fromEntries(FAMILIES.map(family => [family, { units: 0, amount: 0 }]))
+  const sales = new Map()
+  const otherRevenue = new Map()
+  const charges = new Map()
+  const costOfSales = byProduct()
+  const received = byProduct()
+  const made = byProduct()
+  let adjustmentRevenue = 0
+  let adjustmentCost = 0
+  for (const month of months) {
+    for (const invoice of month.transactions) {
+      const adjustment = invoice.policy === 'YEAR_END_ADJUSTMENT'
+      // A royalty is recorded from the payer to the owner. Everything else runs from seller to buyer.
+      const [seller, buyer] = invoice.category === 'royalty' ? [invoice.to, invoice.from] : [invoice.from, invoice.to]
+      if (seller === id) {
+        if (adjustment) adjustmentRevenue += invoice.amount
+        else if (invoice.category === 'goods') {
+          // Every buyer of the goods is listed apart, because each pays its own price.
+          const key = invoice.external ? 'customers' : buyer
+          const group = sales.get(key) ?? { buyer: key, external: invoice.external, products: byProduct() }
+          group.products[invoice.product].units += invoice.quantity
+          group.products[invoice.product].amount += invoice.amount
+          sales.set(key, group)
+        } else {
+          const line = otherRevenue.get(invoice.policy) ?? { policy: invoice.policy, to: new Set(), amount: 0, cost: 0 }
+          line.to.add(buyer)
+          line.amount += invoice.amount
+          line.cost += invoice.basis ?? 0
+          otherRevenue.set(invoice.policy, line)
+        }
+      }
+      if (buyer === id && !invoice.external) {
+        if (adjustment) adjustmentCost += invoice.amount
+        else if (invoice.account === 'operatingExpenses' || invoice.account === 'rdExpense' || (invoice.account === 'cogs' && invoice.category !== 'goods')) {
+          // A fee booked straight to cost of sales: a toll fee true-up, or a toll fee in a month with no output.
+          const line = charges.get(invoice.policy + '/' + invoice.account) ?? { policy: invoice.policy, from: new Set(), account: invoice.account, amount: 0, base: 0 }
+          line.from.add(seller)
+          line.amount += invoice.amount
+          line.base += invoice.basis ?? 0
+          charges.set(invoice.policy + '/' + invoice.account, line)
+        }
+      }
+    }
+    // Cost of sales is what leaves the finished stock: units at the value they were carried at.
+    for (const bin of month.inventory) {
+      if (bin.owner !== id || bin.stage !== 'finished') continue
+      for (const lot of bin.issues) {
+        costOfSales[bin.product].units += lot.quantity
+        costOfSales[bin.product].amount += lot.quantity * lot.unitValue
+      }
+      // What came into finished stock: units made, converted or bought, at the value they are carried at.
+      for (const lot of bin.receipts) {
+        received[bin.product].units += lot.quantity
+        received[bin.product].amount += lot.quantity * lot.unitValue
+      }
+    }
+    if (month.capacity[id]) for (const family of FAMILIES) made[family].units += month.capacity[id].byProduct[family]
+  }
+  const list = (lines, parties) => [...lines.values()].map(line => ({ ...line, [parties]: [...line[parties]] }))
+  const chargeLines = list(charges, 'from')
+  const charged = account => sum(chargeLines.filter(line => line.account === account).map(line => line.amount))
+  const costOfGoods = sum(FAMILIES.map(family => costOfSales[family].amount))
+  let service = null
+  if (isServiceProvider(id)) {
+    // The fee is a fixed monthly amount: the budgeted cost plus the policy markup on it.
+    const fee = sum(months.map(month => month.services[id].fee))
+    const budgetCost = budgetServiceCost[id] * months.length
+    service = {
+      kind: 'fixed', rate: config.policies[POLICY_KINDS[policyKind(id)].target], budgetCost, markup: fee - budgetCost, fee,
+      cost: sum(months.map(month => month.services[id].cost)),
+      trueUp: otherRevenue.get('SERVICE_TRUE_UP')?.amount ?? 0,
+    }
+  } else if (id === 'BE') {
+    // The warehouse charges what it spent in the month, grossed up to leave its margin on the fee.
+    const { amount = 0, cost = 0 } = otherRevenue.get('BE_WAREHOUSE') ?? {}
+    service = { kind: 'margin', rate: config.policies.belgiumMargin, budgetCost: cost, markup: amount - cost, fee: amount, cost, trueUp: 0 }
+  }
+  const paid = charges.get('CH_ROYALTY/operatingExpenses')
+  const earned = otherRevenue.get('CH_ROYALTY')
+  return {
+    months: months.length,
+    sales: [...sales.values()].sort((left, right) => Number(right.external) - Number(left.external)),
+    otherRevenue: list(otherRevenue, 'to'), adjustmentRevenue, revenue: results.revenue,
+    costOfSales: {
+      products: costOfSales, adjustments: adjustmentCost, fees: charged('cogs'),
+      // What is left is customs duty on a year-end adjustment.
+      other: results.cogs - costOfGoods - adjustmentCost - charged('cogs'), total: results.cogs,
+    },
+    charges: chargeLines.filter(line => line.account !== 'cogs'),
+    ownCosts: results.otherOperatingExpenses - charged('operatingExpenses'),
+    ownResearch: results.rdExpense - charged('rdExpense'),
+    operatingExpenses: results.operatingExpenses, operatingProfit: results.operatingProfit,
+    // The royalty is a rate on the third-party sales of the Swiss principal and its limited-risk distributors.
+    royalty: paid || earned ? {
+      direction: paid ? 'paid' : 'earned', rate: config.policies.royaltyRate, base: paid ? paid.base : earned.cost, amount: (paid ?? earned).amount,
+    } : null,
+    service, made: id === 'US' || id === 'PL' ? made : null, received,
+    inventory: months.length ? { opening: stockOf(months[0].inventory, id, 'opening'), closing: stockOf(months.at(-1).inventory, id, 'closing') } : null,
+  }
+}
+
+/**
+ * The detail behind one legal entity's results, budget beside actual: goods sold by buyer
+ * and product line, cost of sales, fees, royalty and stock. `basis` is 'month' for the
+ * month in `period`, or 'year' for the full-year budget beside actuals to date.
+ * Actuals cover revealed months only and are zero before any is revealed. Stock is a
+ * balance, not a flow: an end of the actual inventory that is not known yet is null.
+ */
+export function entityDetail(config, { budget, actual }, id, { basis = 'month', period = 0, revealed = 0 } = {}) {
+  validateConfig(config)
+  if (!ALL_COMPANIES.includes(id)) throw new RangeError('Choose one of the group’s legal entities.')
+  if (basis !== 'month' && basis !== 'year') throw new RangeError('The view is by month or by year.')
+  if (!Number.isInteger(period) || period < 0 || period > 11) throw new RangeError('The month must be between January and December.')
+  if (!Number.isInteger(revealed) || revealed < 0 || revealed > 12) throw new RangeError('Revealed months must be between 0 and 12.')
+  const { budgetServiceCost } = scenarioBudget(config)
+  const lines = months => entityLines(config, id, months, budgetServiceCost)
+  const actualMonths = basis === 'year' ? actual.slice(0, revealed) : period < revealed ? [actual[period]] : []
+  const actualLines = lines(actualMonths)
+  if (!actualMonths.length) {
+    // The year opens on the same stock in the budget and in the actuals.
+    const yearOpening = stockOf(budget[0].inventory, id, 'opening')
+    if (basis === 'year') actualLines.inventory = { opening: yearOpening, closing: yearOpening }
+    // The next month to be revealed starts from the stock the last revealed month ended on.
+    else if (period === revealed) actualLines.inventory = { opening: period ? stockOf(actual[period - 1].inventory, id, 'closing') : yearOpening, closing: null }
+    else actualLines.inventory = { opening: null, closing: null }
+  }
+  return { id, basis, period, revealed, budget: lines(basis === 'year' ? budget : [budget[period]]), actual: actualLines }
 }
 
 /**

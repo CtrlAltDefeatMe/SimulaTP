@@ -219,6 +219,25 @@ tbody tr:hover td, .selected-row td { background: #f4f9fe; }
 .table-name { color: var(--navy); font-weight: 690; }
 .table-select { padding: 0; border: 0; background: transparent; color: var(--navy); font-weight: 700; text-align: left; }
 .table-select:hover { text-decoration: underline; }
+/* Entity detail report: one company, budget beside actual. */
+.entity-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 24px; padding: 15px 20px; }
+.entity-controls label.field { flex: 0 1 340px; }
+.entity-basis { display: grid; gap: 5px; color: var(--secondary); font-size: 12px; font-weight: 650; }
+.entity-table thead tr:first-child th[colspan] { text-align: center; border-bottom-color: var(--border); }
+.entity-table thead th { vertical-align: bottom; }
+.entity-table th[scope="row"] { min-width: 250px; max-width: 420px; background: transparent; color: var(--text); font-weight: 500; white-space: normal; }
+.entity-table th.entity-indent { padding-left: 38px; }
+.entity-table td:nth-child(5), .entity-table th.entity-actual { border-left: 1px solid var(--border); }
+.entity-heading th { padding-top: 9px; padding-bottom: 9px; background: #eef3f9; color: var(--navy); font-size: 11px; font-weight: 740; letter-spacing: 0.05em; text-align: left; text-transform: uppercase; }
+.entity-sub th { padding-top: 12px; padding-bottom: 5px; border-bottom: 0; background: transparent; color: var(--secondary); font-weight: 690; text-align: left; }
+.entity-line th, .entity-line td { padding-top: 7px; padding-bottom: 7px; }
+.entity-subtotal th[scope="row"], .entity-subtotal td { border-top: 1px solid #cbd6e4; color: var(--navy); font-weight: 690; }
+.entity-total th[scope="row"], .entity-total td { border-top: 1px solid #afbdcf; background: #f6f8fb; color: var(--navy); font-weight: 740; }
+.entity-note td { color: var(--secondary); text-align: left; white-space: normal; }
+.entity-table tbody tr:hover td { background: #f4f9fe; }
+.entity-table tbody tr:last-child th { border-bottom: 0; }
+.entity-stick { display: inline-block; position: sticky; left: 20px; }
+.entity-report .panel-note { padding-top: 12px; }
 .dashboard-detail { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 17px; align-items: start; }
 .breakdown { padding-bottom: 8px; }
 .detail-list { list-style: none; margin: 0; padding: 1px 20px 10px; }
@@ -326,6 +345,14 @@ input, select {
   .panel-header { padding: 14px 13px 10px; }
   .chart-scroll { padding-right: 13px; padding-left: 9px; }
   .panel-header h2 { font-size: 16px; }
+  .entity-controls { padding: 12px 13px; }
+  .entity-table th, .entity-table td { padding-right: 9px; padding-left: 9px; }
+  .entity-table th:first-child, .entity-table td:first-child { padding-left: 13px; }
+  /* The line names stay in view while the amounts scroll sideways. */
+  .entity-table th[scope="row"] { position: sticky; left: 0; min-width: 132px; max-width: 150px; background: #fff; box-shadow: 1px 0 0 var(--line); }
+  .entity-table th.entity-indent { padding-left: 20px; }
+  .entity-total th[scope="row"] { background: #f6f8fb; }
+  .entity-stick { left: 13px; max-width: calc(100vw - 60px); white-space: normal; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; }
