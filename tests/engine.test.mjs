@@ -8,6 +8,8 @@ import {
 import { renderEntityDetail } from '../src/entity-view.mjs'
 import { entityWorkbook } from '../src/entity-export.mjs'
 import { columnName, sheetName } from '../src/xlsx.mjs'
+import { fingerprints, stamp } from '../tools/fingerprint.mjs'
+import { readFileSync } from 'node:fs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
 
 const cents = value => Math.round(value * 100) / 100
@@ -1343,4 +1345,12 @@ test('the Excel export has a contents sheet and a sheet per entity, with the rep
   assert.ok(!/<f>[^<]*[+-]0[),<]/.test(us), 'no empty terms')
   // The annual export is named for the full year.
   assert.equal(entityWorkbook({ config, year, entities: ['US'], basis: 'year', period: 0, revealed: 12 }).fileName, 'PlayTP entity detail full year 2027.xlsx')
+})
+
+test('the page loads every code and style file by its fingerprint, so a reload after a publish gets the new files', () => {
+  const page = readFileSync(new URL('../index.html', import.meta.url), 'utf8')
+  // If this fails, run: node tools/fingerprint.mjs
+  assert.equal(page, stamp(page, fingerprints()), 'index.html fingerprints are out of date')
+  assert.ok(page.indexOf('type="importmap"') < page.indexOf('type="module"'), 'the import map comes before the first module')
+  assert.ok(!/src="\.\/src\/[\w-]+\.mjs"/.test(page) && !/href="\.\/src\/[\w-]+\.css"/.test(page))
 })
