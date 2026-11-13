@@ -37,10 +37,10 @@ export const POLICY_LABELS = {
   CH_TO_US: 'Swiss → US cross-supply',
   LRD_GOODS: 'LRD product transfer',
   FFD_GOODS: 'FFD product transfer',
-  PL_TOLL_FEE: 'Poland monthly toll fee',
+  PL_TOLL_FEE: 'Poland quarterly toll fee',
   BE_WAREHOUSE: 'Belgian warehouse fee',
   US_SERVICES: 'US headquarters services',
-  IN_SERVICES: 'India monthly service fee',
+  IN_SERVICES: 'India quarterly service fee',
   RD_SERVICES: 'R&D services · cost plus 10%',
   CH_ROYALTY: 'Swiss royalty to US',
   YEAR_END_ADJUSTMENT: 'Year-end transfer price adjustment',
@@ -345,12 +345,12 @@ function validateConfig(config) {
 }
 
 function validateServiceFees(fees) {
-  if (!fees || typeof fees !== 'object' || Array.isArray(fees)) throw new RangeError('Enter monthly fees by service provider.')
+  if (!fees || typeof fees !== 'object' || Array.isArray(fees)) throw new RangeError('Enter fees by service provider.')
   for (const [id, fee] of Object.entries(fees)) {
     if (!SERVICE_PROVIDERS.includes(id)) throw new RangeError('Unknown service provider: ' + id)
-    const cents = Math.round(fee * 100)
-    if (!Number.isFinite(fee) || fee < 0 || !Number.isSafeInteger(cents) || fee !== cents / 100) {
-      throw new RangeError('Each monthly fee must be a nonnegative dollar amount with at most two decimal places.')
+    // A fee quoted by the quarter is a third of it each month, so a monthly fee need not be whole cents.
+    if (!Number.isFinite(fee) || fee < 0 || !Number.isSafeInteger(Math.round(fee * 100))) {
+      throw new RangeError('Each fee must be a nonnegative dollar amount.')
     }
   }
 }
@@ -1142,6 +1142,82 @@ export function explainVariance(budget, actual) {
   }
 }
 
+/** The months in a quarter. Results are reported by quarter and closed by month underneath. */
+export const QUARTER_MONTHS = 3
+
+// One reporting period made from consecutive closed months, in the shape of a closed month.
+// Flows are added up. Stock runs from the first month's opening to the last month's closing.
+function combineMonths(config, months, quarter) {
+  const [first, last] = [months[0], months.at(-1)]
+  const add = pick => sum(months.map(pick))
+  const transactions = new Map()
+  for (const transaction of months.flatMap(month => month.transactions)) {
+    const { policy, from, to, category, product, external, account } = transaction
+    const key = [policy, from, to, category, product ?? '', external, account ?? ''].join('|')
+    const line = transactions.get(key)
+    if (!line) {
+      transactions.set(key, { ...transaction, ...(transaction.origins ? { origins: { ...transaction.origins } } : {}) })
+      continue
+    }
+    line.quantity += transaction.quantity
+    line.amount += transaction.amount
+    if (typeof transaction.basis === 'number') line.basis = (line.basis ?? 0) + transaction.basis
+    for (const [origin, value] of Object.entries(transaction.origins ?? {})) {
+      line.origins ??= {}
+      line.origins[origin] = (line.origins[origin] ?? 0) + value
+    }
+  }
+  const { tax, customs } = summarizeTaxAndCustoms(config, months)
+  return {
+    quarter, months: months.map(month => month.month), month: last.month, costScale: first.costScale,
+    entities: Object.fromEntries(Object.keys(first.entities).map(id => {
+      const results = months.map(month => month.entities[id])
+      return [id, { ...rollupPnl(results), externalRevenue: sum(results.map(entity => entity.externalRevenue)), intercompanyRevenue: sum(results.map(entity => entity.intercompanyRevenue)) }]
+    })),
+    consolidated: rollupPnl(months.map(month => month.consolidated)),
+    sales: months.flatMap(month => month.sales),
+    capacity: Object.fromEntries(Object.keys(first.capacity).map(id => [id, {
+      limit: add(month => month.capacity[id].limit), used: add(month => month.capacity[id].used),
+      byProduct: Object.fromEntries(FAMILIES.map(family => [family, add(month => month.capacity[id].byProduct[family])])),
+    }])),
+    royaltyBase: add(month => month.royaltyBase),
+    services: Object.fromEntries(Object.keys(first.services).map(id => [id, Object.fromEntries(
+      Object.keys(first.services[id]).map(key => [key, add(month => month.services[id][key])]),
+    )])),
+    inventory: first.inventory.map((bin, index) => ({
+      ...bin, opening: bin.opening, closing: last.inventory[index].closing,
+      receipts: months.flatMap(month => month.inventory[index].receipts), issues: months.flatMap(month => month.inventory[index].issues),
+    })),
+    // The largest control difference in any of the months. Each is zero to the cent.
+    reconciliation: Object.fromEntries(Object.keys(first.reconciliation).map(key => [
+      key, months.map(month => month.reconciliation[key]).reduce((worst, value) => Math.abs(value) > Math.abs(worst) ? value : worst, 0),
+    ])),
+    tax, customs, transactions: [...transactions.values()],
+    // Year-end adjustments and local statutory results belong to the last close of the year.
+    ...(last.yearEnd ? { yearEnd: last.yearEnd, stat: last.stat } : {}),
+  }
+}
+
+/**
+ * The year by quarter. Each quarter has the shape of a closed month, so anything that
+ * reads a month reads a quarter the same way. `variance` adds up the monthly bridges.
+ */
+export function quarterly(config, { budget, actual, variance }) {
+  validateConfig(config)
+  const quarters = months => Array.from({ length: Math.floor(months.length / QUARTER_MONTHS) }, (_, quarter) =>
+    combineMonths(config, months.slice(quarter * QUARTER_MONTHS, (quarter + 1) * QUARTER_MONTHS), quarter + 1))
+  const result = { budget: quarters(budget), actual: quarters(actual) }
+  return {
+    ...result,
+    variance: result.actual.map((quarter, index) => {
+      const bridges = variance.slice(index * QUARTER_MONTHS, (index + 1) * QUARTER_MONTHS)
+      const total = Object.fromEntries(Object.keys(bridges[0]).filter(key => key !== 'month' && key !== 'operatingMargin')
+        .map(key => [key, sum(bridges.map(bridge => bridge[key]))]))
+      return { quarter: index + 1, ...total, operatingMargin: quarter.consolidated.operatingMargin - result.budget[index].consolidated.operatingMargin }
+    }),
+  }
+}
+
 function rollupPnl(months) {
   return pnl(
     sum(months.map(month => month.revenue)),
@@ -1353,7 +1429,7 @@ function crossSupplyQuote(route, forecast, policies, floor = null) {
     if (floor && price < floor[family]) held.push(family)
     return [family, floor ? Math.max(price, floor[family]) : price]
   }))
-  const note = !invoices.length ? 'No shipments are forecast for this route through December.' : floorNote(held)
+  const note = !invoices.length ? 'No shipments are forecast for this route through the end of the year.' : floorNote(held)
   return { recommended, note, held }
 }
 
@@ -1424,29 +1500,56 @@ function originMatters(config, id, family) {
   return importDutyRate(config, supplier, id, family, 'US') !== importDutyRate(config, supplier, id, family, 'EU')
 }
 
+const quarterOf = vintage => Math.ceil(Number(vintage.slice(5)) / QUARTER_MONTHS)
+
 // Lots that came into one bin in the same month, the same way and at one value are a layer.
 // Goods converted in one month from materials bought in different months are layers of
 // their own. The declared origin tells layers apart only where it changes the duty. Where
 // a month still brought in lots at more than one value, `n` numbers them in the order they
 // arrived. It is read from the whole year, so a layer keeps its number in every month.
-function layerIndex(config, months, id) {
+// With `grain` 'quarter', the months of a quarter that came in the same way at one value
+// are a single layer, as long as that holds in the budget and in the actuals alike, so
+// both list the same layers.
+function layerIndexes(config, sides, id, grain = 'month') {
   const split = Object.fromEntries(FAMILIES.map(family => [family, originMatters(config, id, family)]))
   const declared = (product, lot) => split[product] ? lot.declared : null
-  const values = new Map()
-  const rank = (stage, product, lot) => {
-    const key = [stage, product, lot.vintage, lot.source, declared(product, lot) ?? '', lot.materials ?? ''].join('/')
-    const seen = values.get(key) ?? []
-    values.set(key, seen)
-    const found = seen.findIndex(value => Math.abs(value - lot.unitValue) < 1e-9)
-    return found < 0 ? seen.push(lot.unitValue) - 1 : found
-  }
-  months.forEach((month, index) => {
+  const quarterKey = (stage, product, lot) => [stage, product, lot.vintage.slice(0, 4), quarterOf(lot.vintage), lot.source, declared(product, lot) ?? ''].join('/')
+  const scan = (months, visit) => months.forEach((month, index) => {
     for (const bin of month.inventory) {
       if (bin.owner !== id) continue
-      for (const lot of index ? bin.receipts : [...bin.opening, ...bin.receipts]) rank(bin.stage, bin.product, lot)
+      for (const lot of index ? bin.receipts : [...bin.opening, ...bin.receipts]) visit(bin.stage, bin.product, lot)
     }
   })
-  return { rank, declared }
+  // A quarter is one layer when it spans more than one month and all its lots share one value, on both sides.
+  const mixed = new Set()
+  const spans = new Map()
+  if (grain === 'quarter') {
+    for (const months of Object.values(sides)) {
+      const first = new Map()
+      scan(months, (stage, product, lot) => {
+        const key = quarterKey(stage, product, lot)
+        spans.set(key, (spans.get(key) ?? new Set()).add(lot.vintage))
+        if (!first.has(key)) first.set(key, lot.unitValue)
+        else if (Math.abs(first.get(key) - lot.unitValue) >= 1e-9) mixed.add(key)
+      })
+    }
+  }
+  const whole = (stage, product, lot) => {
+    const key = quarterKey(stage, product, lot)
+    return grain === 'quarter' && !mixed.has(key) && spans.get(key)?.size > 1
+  }
+  return Object.fromEntries(Object.entries(sides).map(([side, months]) => {
+    const values = new Map()
+    const rank = (stage, product, lot) => {
+      const key = [stage, product, lot.vintage, lot.source, declared(product, lot) ?? '', lot.materials ?? ''].join('/')
+      const seen = values.get(key) ?? []
+      values.set(key, seen)
+      const found = seen.findIndex(value => Math.abs(value - lot.unitValue) < 1e-9)
+      return found < 0 ? seen.push(lot.unitValue) - 1 : found
+    }
+    scan(months, rank)
+    return [side, { rank, declared, whole }]
+  }))
 }
 
 const SOURCE_ORDER = { made: 0, converted: 0, materials: 0, bought: 1 }
@@ -1455,8 +1558,19 @@ const SOURCE_ORDER = { made: 0, converted: 0, materials: 0, bought: 1 }
 function layersOf(lots, stage, product, index) {
   const layers = new Map()
   for (const lot of lots) {
-    const n = index.rank(stage, product, lot)
     const declared = index.declared(product, lot)
+    if (index.whole(stage, product, lot)) {
+      // A quarter bought at one price is one layer. It sorts after the months of its own quarter.
+      const [year, quarter] = [lot.vintage.slice(0, 4), quarterOf(lot.vintage)]
+      const key = [`${year}-${String(quarter * QUARTER_MONTHS).padStart(2, '0')}~`, SOURCE_ORDER[lot.source], lot.source, declared ?? ''].join('/')
+      const layer = layers.get(key) ?? { key, vintage: `${year}-Q${quarter}`, quarter: true, source: lot.source, declared, materials: null, n: 0, units: 0, amount: 0, duty: 0 }
+      layer.units += lot.quantity
+      layer.amount += lot.quantity * lot.unitValue
+      layer.duty += lot.quantity * lot.unitDuty
+      layers.set(key, layer)
+      continue
+    }
+    const n = index.rank(stage, product, lot)
     // The key sorts the layers of a bin into the order they are sold: by month, goods made or converted before goods bought.
     const key = [lot.vintage, SOURCE_ORDER[lot.source], lot.source, declared ?? '', lot.materials ?? '', String(n).padStart(3, '0')].join('/')
     const layer = layers.get(key) ?? { key, vintage: lot.vintage, source: lot.source, declared, materials: lot.materials, n, units: 0, amount: 0, duty: 0 }
@@ -1600,35 +1714,43 @@ function entityLines(config, id, months, budgetServiceCost, index) {
 
 /**
  * The detail behind one legal entity's results, budget beside actual: goods sold by buyer
- * and product line, cost of sales, fees, royalty and stock. `basis` is 'month' for the
- * month in `period`, or 'year' for the full-year budget beside actuals to date.
- * Actuals cover revealed months only and are zero before any is revealed. Stock is a
+ * and product line, cost of sales, fees, royalty and stock. `basis` is 'quarter' for the
+ * quarter in `period` (0 to 3), 'month' for the month in `period` (0 to 11), or 'year' for
+ * the full-year budget beside actuals to date. `revealed` counts the months revealed.
+ * Actuals cover revealed periods only and are zero before any is revealed. Stock is a
  * balance, not a flow: an end of the actual inventory that is not known yet is null.
- * Cost of sales, receipts and stock each list their `layers`: the lots of one month at one
- * value, first in, first out, with the customs duty inside the value.
+ * Cost of sales, receipts and stock each list their `layers`: the lots that came in at one
+ * value, first in, first out, with the customs duty inside the value. `layers` is 'month'
+ * for a layer per month, or 'quarter' to list a quarter bought at one price as one layer.
  */
-export function entityDetail(config, { budget, actual }, id, { basis = 'month', period = 0, revealed = 0 } = {}) {
+export function entityDetail(config, { budget, actual }, id, { basis = 'month', period = 0, revealed = 0, layers = 'month' } = {}) {
   validateConfig(config)
   if (!ALL_COMPANIES.includes(id)) throw new RangeError('Choose one of the group’s legal entities.')
-  if (basis !== 'month' && basis !== 'year') throw new RangeError('The view is by month or by year.')
-  if (!Number.isInteger(period) || period < 0 || period > 11) throw new RangeError('The month must be between January and December.')
+  if (!['month', 'quarter', 'year'].includes(basis)) throw new RangeError('The view is by month, by quarter or by year.')
+  if (layers !== 'month' && layers !== 'quarter') throw new RangeError('Stock layers are by month or by quarter.')
+  // A period covers one month or the three months of a quarter.
+  const span = basis === 'quarter' ? QUARTER_MONTHS : 1
+  const start = period * span
+  if (!Number.isInteger(period) || period < 0 || start + span > 12) {
+    throw new RangeError(basis === 'quarter' ? 'The quarter must be between the first and the fourth.' : 'The month must be between January and December.')
+  }
   if (!Number.isInteger(revealed) || revealed < 0 || revealed > 12) throw new RangeError('Revealed months must be between 0 and 12.')
   const { budgetServiceCost } = scenarioBudget(config)
-  const ranks = { budget: layerIndex(config, budget, id), actual: layerIndex(config, actual, id) }
-  const actualMonths = basis === 'year' ? actual.slice(0, revealed) : period < revealed ? [actual[period]] : []
+  const ranks = layerIndexes(config, { budget, actual }, id, layers)
+  const actualMonths = basis === 'year' ? actual.slice(0, revealed) : start + span <= revealed ? actual.slice(start, start + span) : []
   const actualLines = entityLines(config, id, actualMonths, budgetServiceCost, ranks.actual)
   if (!actualMonths.length) {
     // The year opens on the same stock in the budget and in the actuals.
     const yearOpening = stockOf(actual[0].inventory, id, 'opening', ranks.actual)
     if (basis === 'year') actualLines.inventory = { opening: yearOpening, closing: yearOpening }
-    // The next month to be revealed starts from the stock the last revealed month ended on.
-    else if (period === revealed) {
-      actualLines.inventory = { opening: period ? stockOf(actual[period - 1].inventory, id, 'closing', ranks.actual) : yearOpening, closing: null }
+    // The next period to be revealed starts from the stock the last revealed month ended on.
+    else if (start <= revealed) {
+      actualLines.inventory = { opening: start ? stockOf(actual[start - 1].inventory, id, 'closing', ranks.actual) : yearOpening, closing: null }
     } else actualLines.inventory = { opening: null, closing: null }
   }
   return {
     id, basis, period, revealed,
-    budget: entityLines(config, id, basis === 'year' ? budget : [budget[period]], budgetServiceCost, ranks.budget), actual: actualLines,
+    budget: entityLines(config, id, basis === 'year' ? budget : budget.slice(start, start + span), budgetServiceCost, ranks.budget), actual: actualLines,
   }
 }
 
@@ -1728,7 +1850,7 @@ function yearToDate(config, months, floors) {
 /** Record new fixed monthly fees for Poland and India from the month after a quarterly review. */
 export function applyServiceFees(config, revealed, fees = {}) {
   const startMonth = quarterPricingMonth(revealed)
-  if (!startMonth) throw new RangeError('Review and change service fees after closing March, June, or September.')
+  if (!startMonth) throw new RangeError('Review and change service fees after closing the first, second or third quarter.')
   validateConfig(config)
   validateServiceFees(fees)
   const { initialFees } = scenarioBudget(config)
@@ -1745,7 +1867,7 @@ export function applyServiceFees(config, revealed, fees = {}) {
 
 export function applyGoodsPrices(config, revealed, overrides = {}) {
   const startMonth = quarterPricingMonth(revealed)
-  if (!startMonth) throw new RangeError('Review and change goods prices after closing March, June, or September.')
+  if (!startMonth) throw new RangeError('Review and change goods prices after closing the first, second or third quarter.')
   validateConfig(config)
   validatePriceTable(overrides)
   const { initial, floors } = scenarioBudget(config)
@@ -1774,7 +1896,7 @@ export function applyGoodsPrices(config, revealed, overrides = {}) {
 
 /** Record the year-end adjustment chosen for each tested party once December is closed. */
 export function applyYearEndAdjustments(config, revealed, choices = {}) {
-  if (revealed !== 12) throw new RangeError('Year-end adjustments open once December actuals are revealed.')
+  if (revealed !== 12) throw new RangeError('Year-end adjustments open once fourth-quarter actuals are revealed.')
   validateConfig(config)
   for (const [id, mode] of Object.entries(choices)) {
     if (!TESTED_PARTIES.includes(id) || !YEAR_END_MODES.includes(mode)) throw new RangeError('Unknown year-end adjustment choice.')
@@ -1808,7 +1930,7 @@ function runPeriod(config, months) {
  * so the drivers add up to the gap between the budget and the final statutory result.
  */
 export function explainYear(config, { budget, actual }) {
-  if (actual.length !== 12 || !actual[11].yearEnd) throw new RangeError('The year can be explained once December actuals are revealed.')
+  if (actual.length !== 12 || !actual[11].yearEnd) throw new RangeError('The year can be explained once fourth-quarter actuals are revealed.')
   const total = (months, pick) => sum(months.map(pick))
   const { initial, floors } = scenarioBudget(config)
   return actual[11].yearEnd.map(entry => {

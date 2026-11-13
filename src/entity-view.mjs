@@ -5,7 +5,7 @@ const whole = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const rate = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 2 });
 const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const quarterSpans = ['Jan–Mar', 'Apr–Jun', 'Jul–Sep', 'Oct–Dec'];
 const families = Object.keys(PRODUCTS);
 const stageNames = { wip: 'work in process', raw: 'raw materials' };
 // What each kind of intercompany charge is called on the page of the entity that earns it, and of the one that pays it.
@@ -51,7 +51,8 @@ function cells(side, kind) {
 // What a stock layer is called: how and when the units came in.
 function layerLabel(id, stage, layer, showOrigin) {
   const monthOf = vintage => `${shortMonths[Number(vintage.slice(5)) - 1]} ${vintage.slice(0, 4)}`;
-  const when = monthOf(layer.vintage);
+  // A quarter bought at one price is one layer, named for the quarter. Other layers are named for their month.
+  const when = layer.quarter ? `${layer.vintage.slice(5)} ${layer.vintage.slice(0, 4)}` : monthOf(layer.vintage);
   const base = layer.source === 'made' ? `Made ${when}`
     // Goods converted in one month can carry materials bought in two, at two prices.
     : layer.source === 'converted' ? `Converted in Poland ${when}${layer.materials ? `, ${monthOf(layer.materials)} materials` : ''}`
@@ -63,7 +64,7 @@ function layerLabel(id, stage, layer, showOrigin) {
   return `${base}${origin}${layer.n ? ` · lot ${layer.n + 1}` : ''}`;
 }
 
-function buildRows({ id, budget, actual }, showLayers) {
+function buildRows({ id, basis, budget, actual }, showLayers) {
   const rows = [];
   const sides = [budget, actual];
   const heading = text => rows.push({ type: 'heading', text });
@@ -115,7 +116,7 @@ function buildRows({ id, budget, actual }, showLayers) {
     // A service fee is shown as the cost it was set from and the markup on top.
     const fixed = service.kind === 'fixed';
     // Poland and India charge a fixed fee set from budgeted cost. The warehouse charges its actual cost plus a margin on the fee.
-    sub(fixed ? 'Fixed monthly service fee' : 'Warehouse fee on actual cost');
+    sub(fixed ? (basis === 'year' ? 'Fixed service fee, four quarters' : 'Fixed quarterly service fee') : 'Warehouse fee on actual cost');
     line(fixed ? 'Budgeted service cost' : 'Warehouse cost', amount(side => side.service.budgetCost), { keep: true });
     line(fixed ? 'Markup' : 'Margin', amount(side => side.service.markup), { keep: true });
     line(fixed ? 'Markup as a share of budgeted cost' : 'Margin as a share of the fee',
@@ -219,21 +220,22 @@ function rowHtml(row) {
 }
 
 /**
- * The entity detail report: one legal entity, by month or by year, budget beside actual.
- * `entities` lists the ids the reader can choose from, and `calendar` is the month selector
- * shown in the monthly view. `layers` breaks cost of sales and stock out by the month the
- * units came in.
+ * The entity detail report: one legal entity, by quarter or by year, budget beside actual.
+ * `entities` lists the ids the reader can choose from, and `calendar` is the quarter selector
+ * shown in the quarterly view. `layers` breaks cost of sales and stock out by when the
+ * units came in. `detail.revealed` counts months, three to a quarter.
  */
 export function renderEntityDetail({ detail, entities, calendar = '', layers = true }) {
   const { id, basis, period, revealed } = detail;
-  const month = monthNames[period];
-  const budgetLabel = basis === 'year' ? 'Budget · full year 2027' : `Budget · ${month}`;
+  const quarter = `Q${period + 1}`;
+  const closed = Math.floor(revealed / 3);
+  const budgetLabel = basis === 'year' ? 'Budget · full year 2027' : `Budget · ${quarter}`;
   const actualLabel = basis === 'year'
-    ? revealed ? `Actual · year to date through ${monthNames[revealed - 1]}` : 'Actual · no months revealed yet'
-    : period < revealed ? `Actual · ${month}` : `Actual · ${month} not revealed yet`;
+    ? closed ? `Actual · year to date through Q${closed}` : 'Actual · no quarters revealed yet'
+    : period < closed ? `Actual · ${quarter}` : `Actual · ${quarter} not revealed yet`;
   const explain = basis === 'year'
-    ? 'The budget column is the full year. The actual column adds up the months revealed so far.'
-    : 'An actual month shows zero until it is revealed.';
+    ? 'The budget column is the full year. The actual column adds up the quarters revealed so far.'
+    : 'An actual quarter shows zero until it is revealed.';
   return `
     <section class="panel entity-controls" aria-label="Choose what to show">
       <label class="field">Legal entity
@@ -242,7 +244,7 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
       <div class="entity-basis">
         <span id="detail-basis-label">Amounts</span>
         <div class="segmented" role="group" aria-labelledby="detail-basis-label">
-          <button type="button" data-detail-basis="month" aria-pressed="${basis === 'month'}">Monthly</button>
+          <button type="button" data-detail-basis="quarter" aria-pressed="${basis === 'quarter'}">Quarterly</button>
           <button type="button" data-detail-basis="year" aria-pressed="${basis === 'year'}">Annual</button>
         </div>
       </div>
@@ -254,10 +256,10 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
         </div>
       </div>
     </section>
-    ${basis === 'month' ? calendar : ''}
+    ${basis === 'quarter' ? calendar : ''}
     <section class="panel entity-report" aria-labelledby="detail-heading">
       <div class="panel-header"><div><h2 id="detail-heading">${html(nameOf(id))} · ${html(ENTITIES[id].role)}</h2>
-        <p class="subtitle">${basis === 'year' ? 'Full year 2027' : `${month} 2027`} · USD · US GAAP · ${explain}</p></div></div>
+        <p class="subtitle">${basis === 'year' ? 'Full year 2027' : `${quarter} 2027 (${quarterSpans[period]})`} · USD · US GAAP · ${explain}</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="detail-heading"><table class="entity-table">
         <colgroup span="1"></colgroup><colgroup span="3"></colgroup><colgroup span="3"></colgroup>
         <thead>
@@ -267,7 +269,7 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
         <tbody>${buildRows(detail, layers).map(rowHtml).join('')}</tbody>
       </table></div>
       <p class="field-note panel-note">Each goods line is units times the value per unit. Net sales use the net sales price. Cost of sales and inventory use the value the units are carried at in stock, first in, first out: the oldest layer is sold first. ${layers
-        ? 'A layer is the units that came in during one month at one value, which for a distributor is that month’s transfer price plus any customs duty. A product line’s value per unit is the average of its layers.'
-        : 'Turn on stock layers to see the months and prices behind each average.'} To trace a transfer price change, find the new price under Finished goods received in the month it takes effect, then follow that layer into cost of sales once the older layers are sold. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard.</p>
+        ? 'A layer is the units that came in at one value. For a distributor that is a quarter’s purchases at that quarter’s transfer price plus any customs duty. The plants’ cost moves every month, so their layers are by month. A product line’s value per unit is the average of its layers.'
+        : 'Turn on stock layers to see the purchases and prices behind each average.'} To trace a transfer price change, find the new price under Finished goods received in the quarter it takes effect, then follow that layer into cost of sales as the older layers are sold. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard.</p>
     </section>`;
 }

@@ -1,6 +1,6 @@
 import {
   applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_BLOCKS, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, GOODS_ORIGINS, MAX_ROYALTY_RATE,
-  POLICY_LABELS, PRODUCTS, productLineResults, profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear,
+  POLICY_LABELS, PRODUCTS, productLineResults, profitAllocation, QUARTER_MONTHS, quarterly, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear,
   summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
 } from './engine.mjs';
 import { renderBrief } from './brief-view.mjs';
@@ -11,8 +11,11 @@ import { renderYearSummary } from './summary-view.mjs';
 import { renderEntityDetail } from './entity-view.mjs';
 import { licenseeLossWarning, readYearEndChoices, royaltyWarning } from './year-end-view.mjs';
 
-const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+// The year is shown by quarter. The model still closes every month underneath.
+const quarters = ['Q1', 'Q2', 'Q3', 'Q4'];
+const quarterNames = ['First quarter', 'Second quarter', 'Third quarter', 'Fourth quarter'];
+const quarterSpans = ['Jan–Mar', 'Apr–Jun', 'Jul–Sep', 'Oct–Dec'];
+const QUARTER_COUNT = quarters.length;
 const storageKey = 'playtp-2027-v1';
 // Scenarios saved under the game's earlier name, SimulaTP, are still picked up.
 const legacyStorageKey = 'simulatp-2027-v1';
@@ -21,8 +24,8 @@ const pageBody = document.querySelector('#page-body');
 const announcement = document.querySelector('#announcement');
 const summaryDialog = document.querySelector('#year-summary');
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-// How long each month stays on screen while the year runs on its own.
-const RUN_STEP_MS = 320;
+// How long each quarter stays on screen while the year runs on its own.
+const RUN_STEP_MS = 750;
 const navButtons = [...document.querySelectorAll('[data-view]')];
 const formatAmount = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const formatCompactAmount = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 2 });
@@ -88,8 +91,9 @@ function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) ?? localStorage.getItem(legacyStorageKey));
     if (saved?.config && Number.isInteger(saved.revealed) && saved.revealed >= 0 && saved.revealed <= 12) {
-      const { revealed } = saved;
-      const unstarted = revealed === 0 && !saved.config.goodsPriceSchedule?.length;
+      // Progress is saved in months. A game saved part-way through a quarter reopens at the last quarter it finished.
+      const revealed = Math.floor(saved.revealed / QUARTER_MONTHS);
+      const unstarted = saved.revealed === 0 && !saved.config.goodsPriceSchedule?.length;
       const config = upgradeConfig(saved.config, !unstarted);
       const restored = unstarted && config.startingPriceMethod === undefined
         ? { ...config, startingPriceMethod: defaults.startingPriceMethod } : config;
@@ -103,7 +107,7 @@ function loadState() {
 
 function storeState() {
   try {
-    localStorage.setItem(storageKey, JSON.stringify({ config: state.config, revealed: state.revealed }));
+    localStorage.setItem(storageKey, JSON.stringify({ config: state.config, revealed: closedMonths() }));
   } catch {
     // Scenario controls also work for the current page when local storage is unavailable.
   }
@@ -127,31 +131,43 @@ const state = {
   settingsMessage: '',
   pricingMessage: '',
   yearEndMessage: '',
-  // True while the remaining months are being revealed without a stop.
+  // True while the remaining quarters are being revealed without a stop.
   running: false,
-  // The entity report: which company, and whether by month or for the year.
+  // The entity report: which company, and whether by quarter or for the year.
   detailEntity: 'US',
-  detailBasis: 'month',
+  detailBasis: 'quarter',
   detailLayers: true,
 };
 let runTimer = null;
 
+// `state.revealed` and `state.period` count quarters. The engine counts months.
+function closedMonths() {
+  return state.revealed * QUARTER_MONTHS;
+}
+
+// The year rolled up by quarter, rebuilt only when the year itself changes.
+let quarterCache = { year: null, view: null };
+function byQuarter() {
+  if (quarterCache.year !== state.year) quarterCache = { year: state.year, view: quarterly(state.config, state.year) };
+  return quarterCache.view;
+}
+
 function revealButton() {
-  if (state.revealed >= 12) return '<button class="button" disabled>All actuals revealed</button>';
-  if (state.running) return `<button class="button primary" disabled>Running the year · ${months[state.period]}</button>`;
-  return `<button class="button primary" type="button" data-action="reveal">Reveal ${months[state.revealed]} actuals ${icon('next')}</button>`;
+  if (state.revealed >= QUARTER_COUNT) return '<button class="button" disabled>All actuals revealed</button>';
+  if (state.running) return `<button class="button primary" disabled>Running the year · ${quarters[state.period]}</button>`;
+  return `<button class="button primary" type="button" data-action="reveal">Reveal ${quarters[state.revealed]} actuals ${icon('next')}</button>`;
 }
 
 function runButton() {
-  if (state.revealed >= 12) return '<button class="button" type="button" data-action="year-summary">Explain the year</button>';
+  if (state.revealed >= QUARTER_COUNT) return '<button class="button" type="button" data-action="year-summary">Explain the year</button>';
   if (state.running) return '';
-  return `<button class="button" type="button" data-action="run-year" title="Reveal every remaining month without changing transfer prices or fees">${state.revealed ? 'Run the rest of the year' : 'Run the full year'}</button>`;
+  return `<button class="button" type="button" data-action="run-year" title="Reveal every remaining quarter without changing transfer prices or fees">${state.revealed ? 'Run the rest of the year' : 'Run the full year'}</button>`;
 }
 
 function renderHeader() {
   const reviewButton = state.running ? ''
-    : quarterPricingMonth(state.revealed) ? '<button class="button" type="button" data-action="review-prices">Review transfer prices</button>'
-    : state.revealed === 12 ? '<button class="button primary" type="button" data-action="review-prices">Year-end review</button>' : '';
+    : quarterPricingMonth(closedMonths()) ? '<button class="button" type="button" data-action="review-prices">Review transfer prices</button>'
+    : state.revealed === QUARTER_COUNT ? '<button class="button primary" type="button" data-action="review-prices">Year-end review</button>' : '';
   pageHeader.innerHTML = `
     <div>
       <p class="breadcrumb">Simulation <span aria-hidden="true">/</span> FY 2027</p>
@@ -161,15 +177,15 @@ function renderHeader() {
   document.title = `PlayTP · ${views[state.view]}`;
 }
 
-function monthStrip() {
-  const buttons = shortMonths.map((month, index) => `
-    <button type="button" class="month-button ${index < state.revealed ? 'revealed' : ''}" data-period="${index}" aria-label="${months[index]}, ${index < state.revealed ? 'actuals available' : 'budget available'}" aria-pressed="${state.period === index}">
-      ${month}<span class="month-status" aria-hidden="true">${index < state.revealed ? 'Actuals' : 'Budget'}</span>
+function quarterStrip() {
+  const buttons = quarters.map((quarter, index) => `
+    <button type="button" class="month-button ${index < state.revealed ? 'revealed' : ''}" data-period="${index}" aria-label="${quarterNames[index]}, ${quarterSpans[index]}, ${index < state.revealed ? 'actuals available' : 'budget available'}" aria-pressed="${state.period === index}">
+      ${quarter}<span class="month-span" aria-hidden="true">${quarterSpans[index]}</span><span class="month-status" aria-hidden="true">${index < state.revealed ? 'Actuals' : 'Budget'}</span>
     </button>`).join('');
-  return `<section class="panel month-panel" aria-label="Select a reporting month">
+  return `<section class="panel month-panel" aria-label="Select a reporting quarter">
     <div class="month-panel-top">
       <strong>Reporting calendar</strong>
-      <span class="progress-count">${state.revealed} of 12 actual months revealed</span>
+      <span class="progress-count">${state.revealed} of ${QUARTER_COUNT} quarters revealed</span>
     </div>
     <div class="month-strip">${buttons}</div>
   </section>`;
@@ -183,7 +199,7 @@ function kpis(budget, actual) {
     { label: 'Operating margin', key: 'operatingMargin', isMargin: true },
   ];
   const get = (pnl, key) => key === 'grossProfit' ? pnl.revenue - pnl.cogs : pnl[key];
-  return `<section class="kpi-grid" aria-label="${months[state.period]} consolidated KPIs">
+  return `<section class="kpi-grid" aria-label="${quarterNames[state.period]} consolidated KPIs">
     ${stats.map(({ label, key, isMargin }) => {
       const base = get(budget, key);
       const value = actual ? get(actual, key) : base;
@@ -194,17 +210,17 @@ function kpis(budget, actual) {
         <strong class="kpi-number" title="${amount(value, isMargin ? formatPercent : formatAmount)}">${amount(value, display)}</strong>
         <p class="kpi-footer">${actual
           ? `<strong class="${varianceClass(diff)}">${isMargin ? signedPoints(diff) : signed(diff, formatCompactAmount)}</strong> vs ${amount(base, display)} budget`
-          : 'Budget'} · ${shortMonths[state.period]}</p>
+          : 'Budget'} · ${quarters[state.period]}</p>
       </div>`;
     }).join('')}
   </section>`;
 }
 
 function chart() {
-  const { budget, actual } = state.year;
+  const { budget, actual } = byQuarter();
   const metric = state.metric;
   const options = { operatingProfit: 'Operating profit', revenue: 'Net sales' };
-  const values = [...budget, ...actual.slice(0, state.revealed)].map((month) => month.consolidated[metric]);
+  const values = [...budget, ...actual.slice(0, state.revealed)].map((quarter) => quarter.consolidated[metric]);
   const highest = Math.max(1, ...values);
   const lowest = Math.min(0, ...values);
   const range = (highest - lowest) / 4;
@@ -217,7 +233,7 @@ function chart() {
   const bar = (value, classes) => `<span class="bar ${classes} ${value < 0 ? 'down' : ''}" data-bottom="${percent(Math.min(0, value))}" data-height="${Math.abs(percent(value) - percent(0))}"></span>`;
   return `<section class="panel" aria-labelledby="chart-heading">
     <div class="panel-header">
-      <div><h2 id="chart-heading">Monthly performance</h2><p class="subtitle">Consolidated · USD</p></div>
+      <div><h2 id="chart-heading">Quarterly performance</h2><p class="subtitle">Consolidated · USD</p></div>
       <div class="view-controls">
         <div class="legend" aria-label="Series">
           <span class="legend-item"><i class="swatch"></i>Budget</span>
@@ -229,20 +245,20 @@ function chart() {
       </div>
     </div>
     <div class="chart-scroll">
-      <div class="chart" role="group" aria-label="Monthly ${options[metric].toLowerCase()} chart">
+      <div class="chart" role="group" aria-label="Quarterly ${options[metric].toLowerCase()} chart">
         <div class="chart-axis" aria-hidden="true">${ticks.map((value) => `<span>${amount(value, formatCompactAmount)}</span>`).join('')}</div>
         <div class="chart-plot">
           <i class="zero-line" data-bottom="${percent(0)}" aria-hidden="true"></i>
-          ${budget.map((month, index) => {
-            const base = month.consolidated[metric];
+          ${budget.map((quarter, index) => {
+            const base = quarter.consolidated[metric];
             const realized = index < state.revealed ? actual[index].consolidated[metric] : null;
-            const label = `${months[index]} budget ${amount(base)}${realized === null ? '' : `, actual ${amount(realized)}`}`;
+            const label = `${quarterNames[index]} budget ${amount(base)}${realized === null ? '' : `, actual ${amount(realized)}`}`;
             return `<button type="button" class="bar-group" aria-pressed="${index === state.period}" data-period="${index}" aria-label="${label}" title="${label}">
               ${bar(base, realized === null ? '' : 'paired')}${realized === null ? '' : bar(realized, 'actual')}
             </button>`;
           }).join('')}
         </div>
-        <div class="chart-labels" aria-hidden="true">${shortMonths.map((month, index) => `<span class="chart-label ${state.period === index ? 'selected' : ''}">${month}</span>`).join('')}</div>
+        <div class="chart-labels" aria-hidden="true">${quarters.map((quarter, index) => `<span class="chart-label ${state.period === index ? 'selected' : ''}">${quarter}</span>`).join('')}</div>
       </div>
     </div>
   </section>`;
@@ -250,16 +266,16 @@ function chart() {
 
 function annualTable() {
   return `<section class="panel" aria-labelledby="annual-heading">
-    <div class="panel-header"><div><h2 id="annual-heading">12-month budget and actuals</h2><p class="subtitle">Consolidated · USD</p></div></div>
+    <div class="panel-header"><div><h2 id="annual-heading">Budget and actuals by quarter</h2><p class="subtitle">Consolidated · USD</p></div></div>
     <div class="table-scroll">
       <table>
-        <thead><tr><th scope="col">Month</th><th scope="col">Budget sales</th><th scope="col">Actual sales</th><th scope="col">Budget profit</th><th scope="col">Actual profit</th><th scope="col">Profit variance</th><th scope="col">Budget margin</th><th scope="col">Actual margin</th></tr></thead>
+        <thead><tr><th scope="col">Quarter</th><th scope="col">Budget sales</th><th scope="col">Actual sales</th><th scope="col">Budget profit</th><th scope="col">Actual profit</th><th scope="col">Profit variance</th><th scope="col">Budget margin</th><th scope="col">Actual margin</th></tr></thead>
         <tbody>
-          ${state.year.budget.map(({ consolidated: budget }, index) => {
-            const actual = index < state.revealed ? state.year.actual[index].consolidated : null;
+          ${byQuarter().budget.map(({ consolidated: budget }, index) => {
+            const actual = index < state.revealed ? byQuarter().actual[index].consolidated : null;
             const variance = actual ? actual.operatingProfit - budget.operatingProfit : null;
             return `<tr class="${index === state.period ? 'selected-row' : ''}">
-              <td><button class="table-select" type="button" data-period="${index}" aria-pressed="${index === state.period}">${months[index]}</button></td>
+              <td><button class="table-select" type="button" data-period="${index}" aria-pressed="${index === state.period}">${quarters[index]} · ${quarterSpans[index]}</button></td>
               <td>${amount(budget.revenue)}</td><td>${amount(actual?.revenue)}</td>
               <td>${amount(budget.operatingProfit)}</td><td>${amount(actual?.operatingProfit)}</td>
               <td class="${varianceClass(variance)}">${signed(variance)}</td>
@@ -289,10 +305,10 @@ function variancePanel(bridge) {
     check: 'Unexplained difference',
   };
   return `<section class="panel breakdown" aria-labelledby="bridge-heading">
-    <div class="panel-header"><div><h2 id="bridge-heading">Variance bridge</h2><p class="subtitle">${months[state.period]} · actual vs budget</p></div></div>
+    <div class="panel-header"><div><h2 id="bridge-heading">Variance bridge</h2><p class="subtitle">${quarters[state.period]} · actual vs budget</p></div></div>
     ${bridge ? metricList(Object.entries(labels).filter(([key]) => Number.isFinite(bridge[key])).map(([key, label]) => [
       label, key === 'operatingMargin' ? signedPoints(bridge[key]) : signed(bridge[key], key === 'check' ? formatDifference : formatAmount),
-    ])) : '<p class="empty-state">Release this month’s actuals to see its variance bridge.</p>'}
+    ])) : '<p class="empty-state">Reveal this quarter’s actuals to see its variance bridge.</p>'}
   </section>`;
 }
 
@@ -307,7 +323,7 @@ function entityPanel(budget, actual) {
     ['operatingMargin', 'Operating margin'],
   ];
   return `<section class="panel" aria-labelledby="entity-heading">
-    <div class="panel-header"><div><h2 id="entity-heading">Entity results</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD</p></div></div>
+    <div class="panel-header"><div><h2 id="entity-heading">Entity results</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="entity-heading"><table>
       <thead><tr><th scope="col">Entity</th>${labels.map(([, label]) => `<th scope="col">${html(label)}</th>`).join('')}</tr></thead>
       <tbody>${[['Consolidated', pnl.consolidated], ...Object.entries(pnl.entities)].map(([id, row]) => `
@@ -317,15 +333,15 @@ function entityPanel(budget, actual) {
         </tr>`).join('')}
       </tbody>
     </table></div>
-    <p class="field-note panel-note">All monthly figures are US GAAP. ${state.revealed === 12
+    <p class="field-note panel-note">All quarterly figures are US GAAP. ${state.revealed === QUARTER_COUNT
       ? 'The arm’s-length ranges are tested on the local statutory results shown below.'
-      : 'Local statutory results, which the arm’s-length ranges are tested on, are published with the December close.'}</p>
+      : 'Local statutory results, which the arm’s-length ranges are tested on, are published with the fourth-quarter close.'}</p>
   </section>`;
 }
 
 const serviceRoles = { PL: 'Toll manufacturing for Switzerland', IN: 'Shared services for the United States and Switzerland' };
 
-// The fee is fixed for the month and the cost is not, so the markup moves every month.
+// The fee is fixed for the quarter and the cost is not, so the markup moves every quarter.
 function servicePanel(budget, actual) {
   const month = actual ?? budget;
   const { policies, ranges = createConfig().ranges } = state.config;
@@ -346,21 +362,21 @@ function servicePanel(budget, actual) {
     </tr>`;
   };
   return `<section class="panel" aria-labelledby="service-heading">
-    <div class="panel-header"><div><h2 id="service-heading">Service fees and costs</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD · a fixed monthly fee against a cost that moves</p></div></div>
+    <div class="panel-header"><div><h2 id="service-heading">Service fees and costs</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD · a fixed quarterly fee against a cost that moves</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="service-heading"><table class="service-table">
       <thead><tr><th scope="col">Service provider</th><th scope="col">Cost</th><th scope="col">Budget cost</th><th scope="col">Fixed fee</th><th scope="col">Markup on cost</th><th scope="col">Policy markup</th></tr></thead>
       <tbody>${row('PL')}${row('IN')}</tbody>
     </table></div>
-    <p class="field-note panel-note">Each fee is budgeted annual cost plus the policy markup, divided by twelve. Part of Poland’s cost is fixed overhead. In a slow month its cost falls by less than its output and the fee does not fall at all, so its markup rises. A busy month does the reverse.</p>
+    <p class="field-note panel-note">Each fee is budgeted annual cost plus the policy markup, divided by four. Part of Poland’s cost is fixed overhead. In a slow quarter its cost falls by less than its output and the fee does not fall at all, so its markup rises. A busy quarter does the reverse.</p>
   </section>`;
 }
 
 const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range' };
 
-// Local accounts for the year. They exist only once December is closed.
+// Local accounts for the year. They exist only once the fourth quarter is closed.
 function statPanel() {
   const { stat, yearEnd } = state.year.actual[11];
-  if (state.revealed < 12 || !stat) return '';
+  if (state.revealed < QUARTER_COUNT || !stat) return '';
   const tested = new Map(yearEnd.map(entry => [entry.id, entry]));
   return `<section class="panel" aria-labelledby="stat-heading">
     <div class="panel-header"><div><h2 id="stat-heading">Local statutory results</h2><p class="subtitle">Full year 2027 · USD · operating profit on US GAAP and in the local statutory (stat) accounts</p></div></div>
@@ -395,7 +411,7 @@ function productLinePanel(budget, actual) {
     <td>${amount(line.revenue ? (line.revenue - line.cogs) / line.revenue : 0, formatPercent)}</td>
   </tr>`;
   return `<section class="panel" aria-labelledby="product-heading">
-    <div class="panel-header"><div><h2 id="product-heading">Product lines</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · third-party sales at group cost · USD</p></div></div>
+    <div class="panel-header"><div><h2 id="product-heading">Product lines</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · third-party sales at group cost · USD</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="product-heading"><table>
       <thead><tr><th scope="col">Product family</th><th scope="col">Units sold</th><th scope="col">Net sales</th><th scope="col">Cost of goods sold</th><th scope="col">Gross profit</th><th scope="col">Gross margin</th></tr></thead>
       <tbody>${lines.map((line) => row(productFor(line.product), line)).join('')}${row('All product lines', total, 'total-row')}</tbody>
@@ -431,7 +447,7 @@ function customsPanel(customs, basis) {
 
 function taxPanel(budget, actual) {
   const { tax, customs } = summarizeTaxAndCustoms(state.config, [actual ?? budget]);
-  const basis = `${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD`;
+  const basis = `${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD`;
   return `<section class="panel" aria-labelledby="tax-heading">
       <div class="panel-header"><div><h2 id="tax-heading">Income tax</h2><p class="subtitle">${basis} · each entity’s rate applied to its operating profit</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="tax-heading"><table>
@@ -455,9 +471,10 @@ function controlPanels(budget, actual) {
     profitDifference: 'Consolidated profit',
     inventoryDifference: 'Inventory roll-forward',
   };
+  // The limit is set by the month in Scenario settings. A quarter can make three months of it.
   const capacityRows = Object.entries(capacity).map(([id, entry]) => [
     labelFor(id),
-    `${amount(entry.used, formatNumber)} of ${amount(entry.limit, formatNumber)} units`,
+    `${amount(entry.used, formatNumber)} of ${amount(entry.limit, formatNumber)} units · ${amount(state.config.capacity[id], formatNumber)} a month`,
   ]);
   return `<div class="detail-stack">
     <section class="panel breakdown" aria-labelledby="capacity-heading">
@@ -473,17 +490,18 @@ function controlPanels(budget, actual) {
   </div>`;
 }
 
-// Flags goods prices in force this month that are below the supplier's cost or held at the floor.
+// Flags goods prices in force this quarter that are below the supplier's cost or held at the floor.
+// Prices change only at the start of a quarter, so its first month speaks for all of it.
 function priceAlertBanner() {
-  const { belowCost, atFloor, floorMarkup } = goodsPriceAlerts(state.config, state.period + 1);
+  const { belowCost, atFloor, floorMarkup } = goodsPriceAlerts(state.config, state.period * QUARTER_MONTHS + 1);
   const name = ({ product, from, to }) => `${PRODUCTS[product].name}, ${labelFor(from)} to ${labelFor(to)}`;
   const list = rows => rows.map(name).map(html).join('; ');
   let banners = '';
   if (belowCost.length) {
-    banners += `<p class="alert-banner" role="note"><strong>Sold below cost.</strong> In ${months[state.period]}, ${belowCost.length} goods ${belowCost.length === 1 ? 'price is' : 'prices are'} below the supplier’s standard cost: ${list(belowCost)}. <a href="#pricing">See Transfer prices</a> for the amounts and what you can do.</p>`;
+    banners += `<p class="alert-banner" role="note"><strong>Sold below cost.</strong> In ${quarters[state.period]}, ${belowCost.length} goods ${belowCost.length === 1 ? 'price is' : 'prices are'} below the supplier’s standard cost: ${list(belowCost)}. <a href="#pricing">See Transfer prices</a> for the amounts and what you can do.</p>`;
   }
   if (atFloor.length) {
-    banners += `<p class="alert-banner alert-banner-floor" role="note"><strong>Price floor in effect.</strong> In ${months[state.period]}, ${atFloor.length} goods ${atFloor.length === 1 ? 'price is' : 'prices are'} held at the floor of standard cost plus ${formatPercent.format(floorMarkup)}: ${list(atFloor)}. The floor takes priority over a distributor’s range. <a href="#pricing">See Transfer prices</a> for the effect on margins.</p>`;
+    banners += `<p class="alert-banner alert-banner-floor" role="note"><strong>Price floor in effect.</strong> In ${quarters[state.period]}, ${atFloor.length} goods ${atFloor.length === 1 ? 'price is' : 'prices are'} held at the floor of standard cost plus ${formatPercent.format(floorMarkup)}: ${list(atFloor)}. The floor takes priority over a distributor’s range. <a href="#pricing">See Transfer prices</a> for the effect on margins.</p>`;
   }
   return banners;
 }
@@ -491,17 +509,17 @@ function priceAlertBanner() {
 // The entity report: one company's sales, costs, fees and stock, budget beside actual.
 function renderEntities() {
   const detail = entityDetail(state.config, state.year, state.detailEntity, {
-    basis: state.detailBasis, period: state.period, revealed: state.revealed,
+    basis: state.detailBasis, period: state.period, revealed: closedMonths(), layers: 'quarter',
   });
-  pageBody.innerHTML = renderEntityDetail({ detail, entities: legalEntities, calendar: monthStrip(), layers: state.detailLayers });
+  pageBody.innerHTML = renderEntityDetail({ detail, entities: legalEntities, calendar: quarterStrip(), layers: state.detailLayers });
 }
 
 function renderDashboard() {
-  const budget = state.year.budget[state.period];
-  const actual = state.period < state.revealed ? state.year.actual[state.period] : null;
-  const bridge = actual ? state.year.variance[state.period] : null;
+  const budget = byQuarter().budget[state.period];
+  const actual = state.period < state.revealed ? byQuarter().actual[state.period] : null;
+  const bridge = actual ? byQuarter().variance[state.period] : null;
   pageBody.innerHTML = `
-    ${monthStrip()}
+    ${quarterStrip()}
     ${priceAlertBanner()}
     ${kpis(budget.consolidated, actual?.consolidated)}
     ${chart()}
@@ -525,7 +543,7 @@ function inventoryPanel(budget, actual) {
   const units = (lots) => amount(lots.reduce((total, lot) => total + lot.quantity, 0), formatNumber);
   const value = (lots) => amount(lots.reduce((total, lot) => total + lot.quantity * lot.unitValue, 0));
   return `<section class="panel" aria-labelledby="inventory-heading">
-    <div class="panel-header"><div><h2 id="inventory-heading">FIFO inventory roll-forward</h2><p class="subtitle">${months[state.period]} · ${actual ? 'Actual' : 'Budget'} · units and local carrying value in USD</p></div></div>
+    <div class="panel-header"><div><h2 id="inventory-heading">FIFO inventory roll-forward</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · units and local carrying value in USD</p></div></div>
     <div class="table-scroll"><table>
       <thead><tr><th scope="col">Owner</th><th scope="col">Custodian</th><th scope="col">Product family</th><th scope="col">Stage</th><th scope="col">Opening</th><th scope="col">Receipts</th><th scope="col">Issues</th><th scope="col">Closing</th><th scope="col">Closing value</th></tr></thead>
       <tbody>${inventory.map((bin) => `<tr>
@@ -690,8 +708,8 @@ function drawMap() {
 }
 
 function mapTransactions({ forMap = false, entity = state.mapEntity } = {}) {
-  const month = state.year[state.mapBasis][state.period];
-  return month.transactions.filter((transaction) => {
+  const quarter = byQuarter()[state.mapBasis][state.period];
+  return quarter.transactions.filter((transaction) => {
     const { category, from, to, policy } = transaction;
     const isToll = forMap && policy === 'PL_TOLL_BUDGET';
     if (state.filter !== 'all' && state.filter !== category && !(isToll && state.filter === 'goods')) return false;
@@ -702,7 +720,7 @@ function mapTransactions({ forMap = false, entity = state.mapEntity } = {}) {
 }
 
 function mapTable(transactions) {
-  if (!transactions.length) return '<p class="empty-state">There are no matching transactions for this month.</p>';
+  if (!transactions.length) return '<p class="empty-state">There are no matching transactions for this quarter.</p>';
   return `<div class="table-scroll"><table aria-label="Transaction ledger">
     <thead><tr><th scope="col">Transaction</th><th scope="col">From → to</th><th scope="col">Product family</th><th scope="col">Goods route</th><th scope="col">Units</th><th scope="col">USD per unit</th><th scope="col">Amount</th></tr></thead>
     <tbody>${transactions.map((transaction) => {
@@ -749,7 +767,7 @@ function renderMap() {
       </div>
       <div class="map-tools">
         <div class="view-controls">
-          <label class="field">Month<select data-map-period>${months.map((month, index) => `<option value="${index}" ${state.period === index ? 'selected' : ''}>${month}</option>`).join('')}</select></label>
+          <label class="field">Quarter<select data-map-period>${quarters.map((quarter, index) => `<option value="${index}" ${state.period === index ? 'selected' : ''}>${quarter} · ${quarterSpans[index]}</option>`).join('')}</select></label>
           <label class="field">Results<select data-map-basis><option value="budget">Budget</option><option value="actual" ${state.period < state.revealed ? '' : 'disabled'} ${state.mapBasis === 'actual' ? 'selected' : ''}>Actuals</option></select></label>
         </div>
         <div class="legend" aria-label="Flow legend">
@@ -766,7 +784,7 @@ function renderMap() {
     </section>
     <section class="panel" aria-labelledby="flows-heading">
       <div class="panel-header">
-        <div><h2 id="flows-heading">${state.mapEntity ? html(mapLabel(state.mapEntity)) : 'Transaction ledger'}</h2><p class="subtitle">${months[state.period]} · ${state.mapBasis === 'budget' ? 'Budget' : 'Actual'} · ${transactions.length} ${transactions.length === 1 ? 'transaction' : 'transactions'} · USD</p></div>
+        <div><h2 id="flows-heading">${state.mapEntity ? html(mapLabel(state.mapEntity)) : 'Transaction ledger'}</h2><p class="subtitle">${quarters[state.period]} · ${state.mapBasis === 'budget' ? 'Budget' : 'Actual'} · ${transactions.length} ${transactions.length === 1 ? 'transaction' : 'transactions'} · USD</p></div>
         ${state.mapEntity ? '<button type="button" class="button" data-action="clear-map-entity">Clear entity filter</button>' : ''}
       </div>
       ${mapTable(transactions)}
@@ -853,15 +871,15 @@ function renderSettings() {
             <label class="field">US share of R&amp;D (%)${numberInput('rd.usShare', percentInput(rd.usShare), { min: 0, max: 100 })}</label>
           </div>
           <p class="field-note">${marginLocked
-            ? 'The margin target is locked once January actuals are revealed. Start a new scenario to change it.'
-            : 'Set the margin before revealing January. The model recalculates goods costs to meet the annual budget target.'}</p>
+            ? 'The margin target is locked once first-quarter actuals are revealed. Start a new scenario to change it.'
+            : 'Set the margin before revealing the first quarter. The model recalculates goods costs to meet the annual budget target.'}</p>
           <p class="field-note"><span id="rd-allocation">${rdAllocationLabel(rd.usShare)}</span>. The US funds their work at actual cost plus 10%.</p>
         </div>
       </section>
       <div class="form-grid">
         <div class="detail-stack">
           <section class="panel" aria-labelledby="shock-heading">
-            <div class="panel-header"><div><h2 id="shock-heading">Monthly shocks</h2><p class="subtitle">Triangular distributions · percentage changes</p></div></div>
+            <div class="panel-header"><div><h2 id="shock-heading">Demand, price and cost shocks</h2><p class="subtitle">Triangular distributions · percentage changes · drawn for each month and reported by quarter</p></div></div>
             <div class="shock-table"><table>
               <thead><tr><th scope="col">Shock</th>${distributionColumns.map(([, label]) => `<th scope="col">${label}</th>`).join('')}</tr></thead>
               <tbody>${SHOCK_KEYS.map((key) => `<tr>
@@ -889,7 +907,7 @@ function renderSettings() {
         </div>
         <div class="detail-stack">
           <section class="panel" aria-labelledby="production-heading">
-            <div class="panel-header"><div><h2 id="production-heading">Production capacity</h2><p class="subtitle">Maximum units per month, across all three product families</p></div></div>
+            <div class="panel-header"><div><h2 id="production-heading">Production capacity</h2><p class="subtitle">Maximum units per month, across all three product families. A quarter can make three times this</p></div></div>
             <div class="form-fields field-pair">
               ${Object.entries(capacity).map(([id, limit]) => `<label class="field">${html(labelFor(id))}${numberInput(`capacity.${id}`, limit, { min: 0, step: 1 })}</label>`).join('')}
             </div>
@@ -916,14 +934,14 @@ function renderSettings() {
             </div>
           </section>
           <section class="panel" aria-labelledby="service-settings-heading">
-            <div class="panel-header"><div><h2 id="service-settings-heading">Service fees</h2><p class="subtitle">Poland and India charge a fixed monthly fee</p></div></div>
+            <div class="panel-header"><div><h2 id="service-settings-heading">Service fees</h2><p class="subtitle">Poland and India charge a fixed fee each quarter</p></div></div>
             <div class="form-fields">
               <label class="field">Fixed overhead share of Poland’s conversion cost (%)${numberInput('services.polandFixedShare', percentInput(services.polandFixedShare), { min: 0, max: 100 })}</label>
-              <p class="field-note">Each fee is the provider’s budgeted annual cost plus its policy markup, divided by twelve. The fixed share is measured at normal volume and does not fall when Poland converts fewer units. Enter 0 for a fully variable cost.</p>
+              <p class="field-note">Each fee is the provider’s budgeted annual cost plus its policy markup, divided by four. The fixed share is measured at normal volume and does not fall when Poland converts fewer units. Enter 0 for a fully variable cost.</p>
             </div>
           </section>
           <section class="panel" aria-labelledby="stat-settings-heading">
-            <div class="panel-header"><div><h2 id="stat-settings-heading">GAAP-to-stat adjustment</h2><p class="subtitle">Revealed at the December close · share of each local entity’s operating expenses</p></div></div>
+            <div class="panel-header"><div><h2 id="stat-settings-heading">GAAP-to-stat adjustment</h2><p class="subtitle">Revealed at the fourth-quarter close · share of each local entity’s operating expenses</p></div></div>
             <div class="form-fields">
               <label class="field">Chance that an entity has an adjustment (%)${numberInput('statAdjustment.probability', percentInput(statAdjustment.probability), { min: 0, max: 100 })}</label>
               <div class="field-pair">
@@ -973,7 +991,7 @@ function renderSettings() {
       </section>
       <div id="scenario-message" aria-live="polite">${state.settingsMessage ? `<p class="form-message">${html(state.settingsMessage)}</p>` : ''}</div>
       <div class="panel form-footer">
-        <p class="field-note">Applying a scenario recalculates all 12 months, resets the reveal sequence, and clears saved transfer prices.</p>
+        <p class="field-note">Applying a scenario recalculates the full year, resets the reveal sequence, and clears saved transfer prices.</p>
         <div class="view-controls"><button type="button" class="button" data-action="defaults">Restore defaults</button><button class="button primary" type="submit">Apply scenario</button></div>
       </div>
     </form>`;
@@ -1034,7 +1052,7 @@ function revealNext() {
 
 /** Open the pop-up that explains where each tested entity finished the year, and why. */
 function openYearSummary() {
-  if (state.revealed !== 12 || !summaryDialog) return;
+  if (state.revealed !== QUARTER_COUNT || !summaryDialog) return;
   const { config } = state;
   const explanations = explainYear(config, state.year);
   summaryDialog.innerHTML = renderYearSummary({
@@ -1047,15 +1065,15 @@ function openYearSummary() {
   summaryDialog.querySelector('#year-summary-title').focus();
 }
 
-/** Reveal every remaining month at the prices and fees now in force, then explain the year. */
+/** Reveal every remaining quarter at the prices and fees now in force, then explain the year. */
 function runFullYear() {
-  if (state.running || state.revealed >= 12) return;
+  if (state.running || state.revealed >= QUARTER_COUNT) return;
   state.running = true;
   const step = () => {
     revealNext();
     // Without motion the year closes in one step.
-    while (reducedMotion.matches && state.revealed < 12) revealNext();
-    if (state.revealed < 12) {
+    while (reducedMotion.matches && state.revealed < QUARTER_COUNT) revealNext();
+    if (state.revealed < QUARTER_COUNT) {
       if (state.view === 'dashboard') render();
       runTimer = setTimeout(step, RUN_STEP_MS);
       return;
@@ -1063,13 +1081,13 @@ function runFullYear() {
     stopRun();
     storeState();
     render();
-    announcement.textContent = 'December actuals revealed. The year is closed.';
+    announcement.textContent = 'Fourth-quarter actuals revealed. The year is closed.';
     openYearSummary();
   };
   step();
 }
 
-/** Start the same year again from January, with prices, fees and year-end choices back at their start. */
+/** Start the same year again from the first quarter, with prices, fees and year-end choices back at their start. */
 function replayYear() {
   stopRun();
   const config = { ...state.config, goodsPriceSchedule: [], serviceFeeSchedule: [], yearEnd: createConfig().yearEnd };
@@ -1083,7 +1101,7 @@ function replayYear() {
   state.yearEndMessage = '';
   storeState();
   if (summaryDialog?.open) summaryDialog.close();
-  announcement.textContent = 'The same year is ready to replay from January.';
+  announcement.textContent = 'The same year is ready to replay from the first quarter.';
   if (state.view === 'dashboard') render();
   else {
     location.hash = 'dashboard';
@@ -1118,12 +1136,12 @@ function render() {
   if (state.view === 'entities') renderEntities();
   if (state.view === 'map') renderMap();
   if (state.view === 'pricing') {
-    const review = reviewGoodsPricing(state.config, state.revealed);
+    const review = reviewGoodsPricing(state.config, closedMonths());
     const budget = state.year.budget.reduce((year, { consolidated }) => ({
       revenue: year.revenue + consolidated.revenue, operatingProfit: year.operatingProfit + consolidated.operatingProfit,
     }), { revenue: 0, operatingProfit: 0 });
     pageBody.innerHTML = renderGoodsPricing({
-      ...review, revealed: state.revealed, message: state.pricingMessage, yearEndMessage: state.yearEndMessage,
+      ...review, revealed: closedMonths(), message: state.pricingMessage, yearEndMessage: state.yearEndMessage,
       serviceBudget: state.year.budget.map(month => month.services),
       budget: { ...budget, operatingMargin: budget.operatingProfit / budget.revenue, ...summarizeTaxAndCustoms(state.config, state.year.budget) },
     });
@@ -1192,10 +1210,10 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (state.running && (action === 'reveal' || period !== undefined)) return;
-  if (action === 'reveal' && state.revealed < 12) {
+  if (action === 'reveal' && state.revealed < QUARTER_COUNT) {
     revealNext();
     storeState();
-    announcement.textContent = `${months[state.period]} actuals revealed.`;
+    announcement.textContent = `${quarterNames[state.period]} actuals revealed.`;
   } else if (action === 'review-prices' || action === 'start') {
     if (summaryDialog?.open) summaryDialog.close();
     const view = action === 'start' ? 'dashboard' : 'pricing';
@@ -1203,7 +1221,7 @@ document.addEventListener('click', (event) => {
     setView(view, { focus: true });
     return;
   } else if (action === 'defaults') {
-    applyScenario(createConfig(), 'Default scenario restored. All 12 months are ready to reveal.');
+    applyScenario(createConfig(), 'Default scenario restored. All four quarters are ready to reveal.');
     focusAfterRender(button);
     return;
   } else if (action === 'clear-map-entity') {
@@ -1216,9 +1234,9 @@ document.addEventListener('click', (event) => {
     state.filter = filter;
   } else if (mapEntity) {
     state.mapEntity = state.mapEntity === mapEntity ? null : mapEntity;
-  } else if (detailBasis === 'month' || detailBasis === 'year') {
+  } else if (detailBasis === 'quarter' || detailBasis === 'year') {
     state.detailBasis = detailBasis;
-    announcement.textContent = detailBasis === 'year' ? 'Annual amounts shown.' : 'Monthly amounts shown.';
+    announcement.textContent = detailBasis === 'year' ? 'Annual amounts shown.' : 'Quarterly amounts shown.';
   } else if (detailLayers === 'show' || detailLayers === 'hide') {
     state.detailLayers = detailLayers === 'show';
     announcement.textContent = state.detailLayers ? 'Stock layers shown.' : 'Stock layers hidden.';
@@ -1236,11 +1254,11 @@ document.addEventListener('click', (event) => {
     if (strip && month.offsetLeft + month.offsetWidth > strip.scrollLeft + strip.clientWidth) {
       strip.scrollLeft = month.offsetLeft - strip.clientWidth + month.offsetWidth + 6;
     }
-    if (state.revealed === 12) month?.focus({ preventScroll: true });
+    if (state.revealed === QUARTER_COUNT) month?.focus({ preventScroll: true });
   }
   focusAfterRender(button);
-  // Closing December by hand ends the year the same way the automatic run does.
-  if (action === 'reveal' && state.revealed === 12) openYearSummary();
+  // Closing the fourth quarter by hand ends the year the same way the automatic run does.
+  if (action === 'reveal' && state.revealed === QUARTER_COUNT) openYearSummary();
 });
 
 // A click on the backdrop closes the pop-up. Escape closes it without any help.
@@ -1306,14 +1324,14 @@ pageBody.addEventListener('submit', (event) => {
   if (form.id === 'goods-pricing-form') {
     event.preventDefault();
     try {
-      const priced = applyGoodsPrices(state.config, state.revealed, readGoodsPriceOverrides(form));
-      const config = applyServiceFees(priced, state.revealed, readServiceFees(form));
+      const priced = applyGoodsPrices(state.config, closedMonths(), readGoodsPriceOverrides(form));
+      const config = applyServiceFees(priced, closedMonths(), readServiceFees(form));
       if (config !== state.config) {
         const year = runYear(config);
-        reviewGoodsPricing(config, state.revealed);
+        reviewGoodsPricing(config, closedMonths());
         state.year = year;
         state.config = config;
-        state.pricingMessage = `New prices and fees apply from ${months[state.revealed]}. The forecast has been updated.`;
+        state.pricingMessage = `New prices and fees apply from ${quarters[state.revealed]}. The forecast has been updated.`;
         storeState();
       } else {
         state.pricingMessage = 'The current transfer prices and fees are still in effect.';
@@ -1328,11 +1346,11 @@ pageBody.addEventListener('submit', (event) => {
   if (form.id === 'year-end-form') {
     event.preventDefault();
     try {
-      const config = applyYearEndAdjustments(state.config, state.revealed, readYearEndChoices(form));
+      const config = applyYearEndAdjustments(state.config, closedMonths(), readYearEndChoices(form));
       if (config !== state.config) {
         state.year = runYear(config);
         state.config = config;
-        state.yearEndMessage = 'Year-end adjustments posted to the December close.';
+        state.yearEndMessage = 'Year-end adjustments posted to the fourth-quarter close.';
         storeState();
       } else {
         state.yearEndMessage = 'The year-end adjustments are unchanged.';
@@ -1347,7 +1365,7 @@ pageBody.addEventListener('submit', (event) => {
   if (form.id !== 'scenario-form') return;
   event.preventDefault();
   try {
-    applyScenario(readSettings(form), 'Scenario applied. All 12 budget months have been recalculated.');
+    applyScenario(readSettings(form), 'Scenario applied. The full-year budget has been recalculated.');
     document.querySelector('#scenario-form button[type="submit"]').focus({ preventScroll: true });
   } catch (error) {
     document.querySelector('#scenario-message').innerHTML = `<p role="alert" class="form-error">${html(error.message)}</p>`;

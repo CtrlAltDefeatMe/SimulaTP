@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation, quarterly,
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
@@ -462,7 +462,7 @@ test('year-end adjustments to the range touch only distributors outside it', () 
 })
 
 test('year-end adjustments stay closed until December is revealed', () => {
-  assert.throws(() => applyYearEndAdjustments(createConfig(), 11, { DE: 'target' }), /December/)
+  assert.throws(() => applyYearEndAdjustments(createConfig(), 11, { DE: 'target' }), /fourth-quarter/)
   const config = createConfig()
   assert.equal(applyYearEndAdjustments(config, 12, { DE: 'none' }), config)
 })
@@ -576,7 +576,7 @@ test('a service fee set at a quarterly review applies from the next month and it
   const config = createConfig()
   const review = reviewGoodsPricing(config, 6)
   const quotes = Object.fromEntries(review.services.map(quote => [quote.id, quote]))
-  assert.throws(() => applyServiceFees(config, 5, { PL: 50_000 }), /March, June, or September/)
+  assert.throws(() => applyServiceFees(config, 5, { PL: 50_000 }), /first, second or third quarter/)
   assert.throws(() => applyServiceFees(config, 6, { US: 50_000 }), /Unknown service provider/)
   assert.equal(applyServiceFees(config, 6, { PL: quotes.PL.fee }), config)
   const revised = applyServiceFees(config, 6, { PL: quotes.PL.recommended, IN: quotes.IN.recommended })
@@ -671,7 +671,7 @@ test('year-end adjustments to target bring every tested party onto its target in
 
 test('the explanation of the year adds up from the budget to the final statutory result', () => {
   const config = createConfig()
-  assert.throws(() => explainYear(config, { budget: [], actual: [] }), /December/)
+  assert.throws(() => explainYear(config, { budget: [], actual: [] }), /fourth-quarter/)
   for (const scenario of [config, applyYearEndAdjustments(config, 12, { DE: 'target', PL: 'range' })]) {
     const year = runYear(scenario)
     const explanations = explainYear(scenario, year)
@@ -789,7 +789,9 @@ test('the entity detail report shows service fees, the royalty and stock the way
   assert.deepEqual(Object.keys(report('PL', { basis: 'month', period: 0, revealed: 1 }).actual.made), Object.keys(PRODUCTS))
 
   assert.throws(() => report('UNRELATED'), /legal entities/)
-  assert.throws(() => report('DE', { basis: 'quarter' }), /month or by year/)
+  assert.throws(() => report('DE', { basis: 'week' }), /by month, by quarter or by year/)
+  assert.throws(() => report('DE', { basis: 'quarter', period: 4 }), /first and the fourth/)
+  assert.throws(() => report('DE', { layers: 'week' }), /by month or by quarter/)
   assert.throws(() => report('DE', { period: 12 }), /January and December/)
   assert.throws(() => report('DE', { revealed: 13 }), /between 0 and 12/)
 })
@@ -870,4 +872,152 @@ test('the entity detail report lists cost of sales and stock by first-in, first-
   // Switzerland's converted goods are layered by the month their materials were bought.
   const swiss = entityDetail(config, year, 'CH', { basis: 'month', period: 1, revealed: 12 }).actual.received.A.layers
   assert.deepEqual(swiss.map(layer => [layer.source, layer.materials]), [['converted', '2027-01'], ['converted', '2027-02'], ['bought', null]])
+})
+
+test('the year rolls up into four quarters that add up to its twelve months', () => {
+  const config = applyYearEndAdjustments(createConfig(), 12, Object.fromEntries(TESTED_PARTIES.map(id => [id, 'target'])))
+  const year = runYear(config)
+  const quarters = quarterly(config, year)
+  const near = (left, right, label) => assert.ok(Math.abs(left - right) < 0.005, `${label}: ${left} against ${right}`)
+  const units = lots => lots.reduce((sum, lot) => sum + lot.quantity, 0)
+  for (const side of ['budget', 'actual']) {
+    assert.equal(quarters[side].length, 4)
+    quarters[side].forEach((quarter, index) => {
+      const months = year[side].slice(index * 3, index * 3 + 3)
+      const add = pick => months.reduce((sum, month) => sum + pick(month), 0)
+      const label = `${side} Q${index + 1}`
+      assert.equal(quarter.quarter, index + 1)
+      assert.deepEqual(quarter.months, months.map(month => month.month))
+      // Flows are the sum of the three months.
+      for (const key of ['revenue', 'cogs', 'operatingExpenses', 'operatingProfit']) {
+        near(quarter.consolidated[key], add(month => month.consolidated[key]), `${label} consolidated ${key}`)
+        for (const id of Object.keys(quarter.entities)) near(quarter.entities[id][key], add(month => month.entities[id][key]), `${label} ${id} ${key}`)
+      }
+      near(quarter.consolidated.operatingMargin, quarter.consolidated.operatingProfit / quarter.consolidated.revenue, `${label} margin`)
+      near(quarter.royaltyBase, add(month => month.royaltyBase), `${label} royalty base`)
+      near(quarter.customs.total, add(month => month.customs.total), `${label} duty`)
+      near(quarter.tax.total, add(month => month.tax.total), `${label} tax`)
+      for (const id of ['PL', 'IN']) {
+        near(quarter.services[id].fee, add(month => month.services[id].fee), `${label} ${id} fee`)
+        near(quarter.services[id].cost, add(month => month.services[id].cost), `${label} ${id} cost`)
+      }
+      for (const id of ['US', 'PL']) {
+        assert.equal(quarter.capacity[id].used, add(month => month.capacity[id].used), label)
+        assert.equal(quarter.capacity[id].limit, config.capacity[id] * 3, label)
+      }
+      // The same invoices, merged by kind, counterparties and product line.
+      near(quarter.transactions.reduce((sum, line) => sum + line.amount, 0), add(month => month.transactions.reduce((sum, line) => sum + line.amount, 0)), `${label} transactions`)
+      assert.equal(quarter.transactions.reduce((sum, line) => sum + line.quantity, 0), add(month => month.transactions.reduce((sum, line) => sum + line.quantity, 0)), label)
+      assert.ok(quarter.transactions.length < add(month => month.transactions.length), label)
+      assert.equal(productLineResults(quarter).reduce((sum, line) => sum + line.units, 0), add(month => productLineResults(month).reduce((sum, line) => sum + line.units, 0)), label)
+      // Stock runs from the first month's opening to the last month's closing, and rolls forward.
+      quarter.inventory.forEach((bin, position) => {
+        assert.equal(units(bin.opening), units(months[0].inventory[position].opening), label)
+        assert.equal(units(bin.closing), units(months[2].inventory[position].closing), label)
+        assert.equal(units(bin.opening) + units(bin.receipts) - units(bin.issues), units(bin.closing), label)
+      })
+      for (const value of Object.values(quarter.reconciliation)) assert.ok(Math.abs(value) < 0.005, label)
+    })
+    // Each quarter opens on the stock the one before closed on.
+    for (let index = 1; index < 4; index++) {
+      assert.deepEqual(quarters[side][index].inventory.map(bin => units(bin.opening)), quarters[side][index - 1].inventory.map(bin => units(bin.closing)))
+    }
+  }
+  // Year-end adjustments and local statutory results belong to the fourth quarter only.
+  assert.deepEqual(quarters.actual.map(quarter => Boolean(quarter.yearEnd)), [false, false, false, true])
+  assert.equal(quarters.actual[3].stat, year.actual[11].stat)
+  assert.ok(quarters.budget.every(quarter => !quarter.yearEnd))
+  // The quarter's bridge is the sum of its months' bridges and still explains the whole gap.
+  quarters.variance.forEach((bridge, index) => {
+    const months = year.variance.slice(index * 3, index * 3 + 3)
+    for (const key of ['volume', 'salesPrice', 'materials', 'otherCogs', 'operatingExpenses', 'operatingProfit']) {
+      near(bridge[key], months.reduce((sum, month) => sum + month[key], 0), `Q${index + 1} ${key}`)
+    }
+    near(bridge.operatingProfit, quarters.actual[index].consolidated.operatingProfit - quarters.budget[index].consolidated.operatingProfit, `Q${index + 1} profit gap`)
+    near(bridge.volume + bridge.salesPrice + bridge.materials + bridge.otherCogs + bridge.operatingExpenses, bridge.operatingProfit, `Q${index + 1} bridge`)
+    near(bridge.operatingMargin, quarters.actual[index].consolidated.operatingMargin - quarters.budget[index].consolidated.operatingMargin, `Q${index + 1} margin gap`)
+  })
+})
+
+test('the entity detail report works by quarter and lists a quarter bought at one price as one layer', () => {
+  const config = createConfig()
+  const year = runYear(config)
+  const quarters = quarterly(config, year)
+  const report = (id, options) => entityDetail(config, year, id, { basis: 'quarter', layers: 'quarter', ...options })
+  const each = layers => layers.map(layer => cents(layer.amount / layer.units))
+  const near = (left, right, label) => assert.ok(Math.abs(left - right) < 0.005, `${label}: ${left} against ${right}`)
+  for (const id of Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)) {
+    for (let period = 0; period < 4; period++) {
+      const detail = report(id, { period, revealed: 12 })
+      for (const side of ['budget', 'actual']) {
+        const lines = detail[side]
+        const results = quarters[side][period].entities[id]
+        near(lines.revenue, results.revenue, `${id} Q${period + 1} ${side} revenue`)
+        near(lines.costOfSales.total, results.cogs, `${id} Q${period + 1} ${side} cost of sales`)
+        near(lines.operatingProfit, results.operatingProfit, `${id} Q${period + 1} ${side} profit`)
+        assert.equal(lines.months, 3)
+        // Every line is still the sum of its layers.
+        for (const line of [...Object.values(lines.costOfSales.products), ...Object.values(lines.received), ...lines.inventory.opening, ...lines.inventory.closing]) {
+          assert.equal(line.layers.reduce((sum, layer) => sum + layer.units, 0), line.units, id)
+          near(line.layers.reduce((sum, layer) => sum + layer.amount, 0), line.amount, `${id} layers`)
+          assert.deepEqual(line.layers.map(layer => layer.key), line.layers.map(layer => layer.key).sort(), id)
+        }
+      }
+    }
+  }
+
+  // Germany pays one price all quarter, so each quarter's purchases are one layer. Its opening stock was bought at two prices.
+  const first = report('DE', { period: 0, revealed: 3 })
+  for (const side of [first.budget, first.actual]) {
+    assert.deepEqual(side.inventory.opening.find(row => row.product === 'A').layers.map(layer => layer.vintage), ['2026-11', '2026-12'])
+    assert.deepEqual(side.received.A.layers.map(layer => [layer.vintage, layer.quarter]), [['2027-Q1', true]])
+    assert.deepEqual(side.costOfSales.products.A.layers.map(layer => layer.vintage), ['2026-11', '2026-12', '2027-Q1'])
+    assert.deepEqual(side.inventory.closing.find(row => row.product === 'A').layers.map(layer => layer.vintage), ['2027-Q1'])
+  }
+  // The budget and the actuals list the same layers, so they share a row.
+  assert.deepEqual(first.budget.costOfSales.products.A.layers.map(layer => layer.key), first.actual.costOfSales.products.A.layers.map(layer => layer.key))
+
+  // A quarter is zero until all three of its months are revealed. The next one to be revealed shows its opening stock.
+  const waiting = report('DE', { period: 1, revealed: 3 }).actual
+  assert.equal(waiting.revenue, 0)
+  assert.deepEqual(waiting.inventory.opening, first.actual.inventory.closing)
+  assert.equal(waiting.inventory.closing, null)
+  assert.equal(report('DE', { period: 1, revealed: 5 }).actual.revenue, 0)
+  assert.deepEqual(report('DE', { period: 2, revealed: 3 }).actual.inventory, { opening: null, closing: null })
+  assert.ok(report('DE', { period: 1, revealed: 6 }).actual.revenue > 0)
+
+  // A price raised at the first-quarter review is the second quarter's layer, beside the budgeted price.
+  // About two-thirds of that quarter's units still come from the older layer.
+  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices
+  const raised = Object.fromEntries(current.map(entry => [entry.product, cents(entry.applied * 1.1)]))
+  const changedConfig = applyGoodsPrices(config, 3, { 'CH-DE': raised })
+  const changed = runYear(changedConfig)
+  const second = entityDetail(changedConfig, changed, 'DE', { basis: 'quarter', period: 1, revealed: 6, layers: 'quarter' })
+  assert.deepEqual(each(second.actual.received.A.layers), [raised.A])
+  assert.ok(each(second.budget.received.A.layers)[0] < raised.A)
+  assert.deepEqual(second.actual.received.A.layers.map(layer => layer.key), second.budget.received.A.layers.map(layer => layer.key))
+  const sold = second.actual.costOfSales.products.A
+  const atNewPrice = sold.layers.find(layer => layer.vintage === '2027-Q2').units / sold.units
+  assert.ok(atNewPrice > 0.25 && atNewPrice < 0.45, String(atNewPrice))
+  const third = entityDetail(changedConfig, changed, 'DE', { basis: 'quarter', period: 2, revealed: 9, layers: 'quarter' })
+  assert.ok(third.actual.costOfSales.products.A.layers.every(layer => cents(layer.amount / layer.units) === raised.A))
+
+  // The plants' cost moves every month, so their layers stay by month.
+  const us = report('US', { period: 1, revealed: 12 }).actual.received.A.layers
+  assert.deepEqual(us.filter(layer => layer.source === 'made').map(layer => layer.vintage), ['2027-04', '2027-05', '2027-06'])
+  assert.deepEqual(us.filter(layer => layer.source === 'bought').map(layer => layer.vintage), ['2027-Q2'])
+  // By month, the same report keeps a layer for every month.
+  assert.deepEqual(entityDetail(config, year, 'DE', { basis: 'quarter', period: 0, revealed: 3 }).actual.received.A.layers.map(layer => layer.vintage), ['2027-01', '2027-02', '2027-03'])
+})
+
+test('a service fee quoted by the quarter is charged a third each month', () => {
+  const config = createConfig()
+  const before = reviewGoodsPricing(config, 3).services.find(service => service.id === 'IN')
+  const revised = applyServiceFees(config, 3, { IN: 46_000.01 / 3 })
+  const year = runYear(revised)
+  const quarters = quarterly(revised, year)
+  assert.equal(cents(quarters.actual[1].services.IN.fee), 46_000.01)
+  assert.equal(cents(quarters.actual[0].services.IN.fee), cents(before.fee * 3))
+  assert.throws(() => applyServiceFees(config, 3, { IN: -1 }), /nonnegative/)
+  assert.throws(() => applyServiceFees(config, 3, { IN: Number.NaN }), /nonnegative/)
 })
