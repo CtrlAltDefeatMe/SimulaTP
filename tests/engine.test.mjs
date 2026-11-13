@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation,
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
@@ -172,8 +172,28 @@ test('duty rates saved by goods route become rates by block, origin and product 
   assert.equal(upgradeConfig({ ...createConfig(), customs: { rates: untouched } }, true).customs.rates['CA.EU'].A, 0)
 })
 
+test('the default plants run at their limit in busy months without leaving demand unfilled', () => {
+  const config = createConfig()
+  assert.deepEqual(config.capacity, { US: 2150, PL: 2900 })
+  const { budget, actual } = runYear(config)
+  for (const months of [budget, actual]) {
+    for (const id of ['US', 'PL']) {
+      assert.ok(months.every(month => month.capacity[id].used <= config.capacity[id]), id)
+      assert.ok(months.some(month => month.capacity[id].used === config.capacity[id]), id)
+      assert.ok(months.some(month => month.capacity[id].used < config.capacity[id]), id)
+    }
+    // Stock covers what the plants cannot make in a busy month.
+    assert.ok(months.every(month => month.sales.every(sale => sale.unfilled === 0)))
+  }
+  // A saved scenario that has not started takes the new limits. One in progress, or one with its own limits, keeps them.
+  const earlier = { US: 2550, PL: 4850 }
+  assert.deepEqual(upgradeConfig({ ...createConfig(), capacity: { ...earlier } }, false).capacity, config.capacity)
+  assert.deepEqual(upgradeConfig({ ...createConfig(), capacity: { ...earlier } }, true).capacity, earlier)
+  assert.deepEqual(upgradeConfig({ ...createConfig(), capacity: { US: 2400, PL: 4850 } }, false).capacity, { US: 2400, PL: 4850 })
+})
+
 test('a saved scenario that has not started takes the current default margin, and one in progress keeps its own', () => {
-  const previous = 3_965_513.159268929 / 10_487_570 - 0.04
+  const previous = 2_287_230.2960874448 / 10_487_570 - 0.04
   const saved = { ...createConfig(), annualOperatingMargin: previous }
   assert.equal(upgradeConfig(structuredClone(saved), false).annualOperatingMargin, createConfig().annualOperatingMargin)
   assert.equal(upgradeConfig(structuredClone(saved), true).annualOperatingMargin, previous)
@@ -670,4 +690,106 @@ test('the explanation of the year adds up from the budget to the final statutory
     assert.ok(germany.drivers.some(driver => driver.key === 'salesPrice'))
     assert.equal(germany.drivers.some(driver => driver.key === 'yearEnd'), scenario !== config)
   }
+})
+
+test('the entity detail report adds up to each entity’s results, budget and actual', () => {
+  const config = applyYearEndAdjustments(createConfig(), 12, Object.fromEntries(TESTED_PARTIES.map(id => [id, 'target'])))
+  const year = runYear(config)
+  const companies = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)
+  const add = (list, pick) => list.reduce((sum, item) => sum + pick(item), 0)
+  const near = (left, right, label) => assert.ok(Math.abs(left - right) < 0.005, `${label}: ${left} against ${right}`)
+  for (const id of companies) {
+    for (const [basis, period, revealed] of [['month', 0, 0], ['month', 5, 12], ['month', 11, 12], ['year', 0, 0], ['year', 0, 7], ['year', 0, 12]]) {
+      const detail = entityDetail(config, year, id, { basis, period, revealed })
+      const sides = [
+        ['budget', detail.budget, basis === 'year' ? year.budget : [year.budget[period]]],
+        ['actual', detail.actual, basis === 'year' ? year.actual.slice(0, revealed) : period < revealed ? [year.actual[period]] : []],
+      ]
+      for (const [side, lines, months] of sides) {
+        const label = [id, basis, period, revealed, side].join(' ')
+        const results = months.map(month => month.entities[id])
+        // Units times net sales price, product by product, is goods net sales. Fees, royalty and adjustments make up the rest of revenue.
+        const goods = add(lines.sales, group => add(Object.values(group.products), line => line.amount))
+        near(goods + add(lines.otherRevenue, line => line.amount) + lines.adjustmentRevenue, add(results, result => result.revenue), `${label} revenue`)
+        // Units times the value they were carried at is cost of sales.
+        const { products, adjustments, fees, other, total: costOfSales } = lines.costOfSales
+        near(add(Object.values(products), line => line.amount) + adjustments + fees + other, add(results, result => result.cogs), `${label} cost of sales`)
+        near(costOfSales, add(results, result => result.cogs), `${label} cost of sales total`)
+        near(add(lines.charges, line => line.amount) + lines.ownCosts + lines.ownResearch, add(results, result => result.operatingExpenses), `${label} operating expenses`)
+        near(lines.revenue - costOfSales - lines.operatingExpenses, add(results, result => result.operatingProfit), `${label} operating profit`)
+        assert.ok(lines.ownCosts > -0.005 && lines.ownResearch > -0.005, label)
+        // Nothing is reported as an actual before a month is revealed.
+        if (!months.length) assert.deepEqual([lines.revenue, costOfSales, lines.operatingExpenses, lines.operatingProfit, lines.sales.length], [0, 0, 0, 0, 0], label)
+        // Finished stock rolls forward: beginning plus received less sold is ending, in units and in value.
+        if (months.length && lines.inventory.opening.length) {
+          for (const family of Object.keys(PRODUCTS)) {
+            const stock = rows => rows.find(row => row.stage === 'finished' && row.product === family)
+            const [opening, closing] = [stock(lines.inventory.opening), stock(lines.inventory.closing)]
+            assert.equal(opening.units + lines.received[family].units - products[family].units, closing.units, `${label} ${family} units`)
+            near(opening.amount + lines.received[family].amount - products[family].amount, closing.amount, `${label} ${family} stock value`)
+          }
+        }
+      }
+    }
+  }
+})
+
+test('the entity detail report shows service fees, the royalty and stock the way each is set', () => {
+  const config = createConfig()
+  const year = runYear(config)
+  const report = (id, options) => entityDetail(config, year, id, options)
+  // A service entity shows its budgeted cost and the markup on it separately. Together they are the fee.
+  for (const [id, markup] of [['PL', config.policies.polandMarkup], ['IN', config.policies.indiaServicesMarkup]]) {
+    const { budget, actual } = report(id, { basis: 'month', period: 4, revealed: 12 })
+    for (const { service } of [budget, actual]) {
+      assert.equal(service.kind, 'fixed')
+      assert.equal(cents(service.budgetCost + service.markup), cents(service.fee), id)
+      assert.equal(bp(service.markup / service.budgetCost), bp(markup), id)
+    }
+    // The fee is fixed for the month. The cost behind it is not.
+    assert.equal(cents(actual.service.fee), cents(budget.service.fee), id)
+    assert.notEqual(cents(actual.service.cost), cents(budget.service.cost), id)
+    assert.equal(cents(report(id, { basis: 'year', revealed: 12 }).budget.service.budgetCost), cents(budget.service.budgetCost * 12), id)
+  }
+  const warehouse = report('BE', { basis: 'year', revealed: 12 }).actual.service
+  assert.equal(bp(warehouse.markup / warehouse.fee), bp(config.policies.belgiumMargin))
+
+  // Switzerland pays the royalty on its base, and the United States earns the same amount.
+  const swiss = report('CH', { basis: 'year', revealed: 9 })
+  const owner = report('US', { basis: 'year', revealed: 9 })
+  for (const side of ['budget', 'actual']) {
+    assert.equal(swiss[side].royalty.direction, 'paid')
+    assert.equal(owner[side].royalty.direction, 'earned')
+    assert.equal(cents(swiss[side].royalty.amount), cents(swiss[side].royalty.base * config.policies.royaltyRate))
+    assert.equal(cents(swiss[side].royalty.amount), cents(owner[side].royalty.amount))
+  }
+  assert.equal(cents(swiss.actual.royalty.base), cents(year.actual.slice(0, 9).reduce((sum, month) => sum + month.royaltyBase, 0)))
+  assert.equal(report('DE', { basis: 'year', revealed: 9 }).actual.royalty, null)
+
+  // The annual view sets the full-year budget beside actuals to date.
+  const units = lines => lines.sales.reduce((sum, group) => sum + Object.values(group.products).reduce((count, line) => count + line.units, 0), 0)
+  const germany = report('DE', { basis: 'year', revealed: 3 })
+  assert.equal(germany.budget.months, 12)
+  assert.equal(germany.actual.months, 3)
+  assert.equal(units(germany.actual), [0, 1, 2].reduce((sum, period) => sum + units(report('DE', { basis: 'month', period, revealed: 3 }).actual), 0))
+  assert.deepEqual(germany.actual.inventory.closing, report('DE', { basis: 'month', period: 2, revealed: 3 }).actual.inventory.closing)
+  assert.deepEqual(germany.actual.inventory.opening, germany.budget.inventory.opening)
+
+  // Stock is a balance. Before the year starts both ends are the opening stock. An unrevealed month has no ending stock yet.
+  const start = report('DE', { basis: 'year', revealed: 0 }).actual
+  assert.equal(start.revenue, 0)
+  assert.deepEqual(start.inventory.closing, start.inventory.opening)
+  assert.ok(start.inventory.opening.every(row => row.units > 0))
+  const next = report('DE', { basis: 'month', period: 3, revealed: 3 }).actual.inventory
+  assert.deepEqual(next.opening, germany.actual.inventory.closing)
+  assert.equal(next.closing, null)
+  assert.deepEqual(report('DE', { basis: 'month', period: 5, revealed: 3 }).actual.inventory, { opening: null, closing: null })
+  // The service entities and the toll manufacturer hold no stock.
+  for (const id of ['PL', 'BE', 'IN']) assert.deepEqual(report(id, { basis: 'year', revealed: 12 }).budget.inventory, { opening: [], closing: [] })
+  assert.deepEqual(Object.keys(report('PL', { basis: 'month', period: 0, revealed: 1 }).actual.made), Object.keys(PRODUCTS))
+
+  assert.throws(() => report('UNRELATED'), /legal entities/)
+  assert.throws(() => report('DE', { basis: 'quarter' }), /month or by year/)
+  assert.throws(() => report('DE', { period: 12 }), /January and December/)
+  assert.throws(() => report('DE', { revealed: 13 }), /between 0 and 12/)
 })

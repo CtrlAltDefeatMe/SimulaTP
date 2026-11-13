@@ -1,5 +1,5 @@
 import {
-  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_BLOCKS, CUSTOMS_LANES, ENTITIES, explainYear, goodsPriceAlerts, GOODS_ORIGINS, MAX_ROYALTY_RATE,
+  applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_BLOCKS, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, GOODS_ORIGINS, MAX_ROYALTY_RATE,
   POLICY_LABELS, PRODUCTS, productLineResults, profitAllocation, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear,
   summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
 } from './engine.mjs';
@@ -8,6 +8,7 @@ import { landPolygons } from './land.mjs';
 import { pricingStatus, readGoodsPriceOverrides, readServiceFees, renderGoodsPricing, useGoodsPriceQuote } from './pricing-view.mjs';
 import { MARKET_SHOCK_KEYS, SHOCK_KEYS } from './simulation.mjs';
 import { renderYearSummary } from './summary-view.mjs';
+import { renderEntityDetail } from './entity-view.mjs';
 import { licenseeLossWarning, readYearEndChoices, royaltyWarning } from './year-end-view.mjs';
 
 const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -32,12 +33,17 @@ const formatDifference = new Intl.NumberFormat('en-US', { minimumFractionDigits:
 const iconPaths = {
   brief: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
   dashboard: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  entities: '<path d="M3 21h18M5 21V4h9v17M14 10h5v11M8 8h3M8 12h3M8 16h3"/>',
   map: '<path d="M4 4l5-2 6 3 5-2v16l-5 2-6-3-5 2zM9 2v16m6-13v16"/>',
   pricing: '<path d="M3 5h10l8 8-8 8-10-10z"/><circle cx="7.5" cy="9" r="1"/>',
   settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="currentColor"/><circle cx="15" cy="17" r="2.5" fill="currentColor"/>',
   next: '<path d="M5 12h13m-6-6 6 6-6 6"/>',
 };
-const views = { brief: 'Case brief', dashboard: '2027 performance', map: 'Transaction map', pricing: 'Transfer prices', settings: 'Scenario settings' };
+const views = {
+  brief: 'Case brief', dashboard: '2027 performance', entities: 'Entity detail', map: 'Transaction map', pricing: 'Transfer prices', settings: 'Scenario settings',
+};
+// The group's own companies, in the order the entity report lists them.
+const legalEntities = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external);
 const categoryLabels = { goods: 'Tangible goods', royalty: 'Royalty', services: 'Services' };
 const categoryColors = { goods: '#4e73a0', royalty: '#92612e', services: '#227466' };
 const shockLabels = { demand: 'Demand', salesPrice: 'Sales price', materialCost: 'Material input cost' };
@@ -123,6 +129,9 @@ const state = {
   yearEndMessage: '',
   // True while the remaining months are being revealed without a stop.
   running: false,
+  // The entity report: which company, and whether by month or for the year.
+  detailEntity: 'US',
+  detailBasis: 'month',
 };
 let runTimer = null;
 
@@ -476,6 +485,14 @@ function priceAlertBanner() {
     banners += `<p class="alert-banner alert-banner-floor" role="note"><strong>Price floor in effect.</strong> In ${months[state.period]}, ${atFloor.length} goods ${atFloor.length === 1 ? 'price is' : 'prices are'} held at the floor of standard cost plus ${formatPercent.format(floorMarkup)}: ${list(atFloor)}. The floor takes priority over a distributor’s range. <a href="#pricing">See Transfer prices</a> for the effect on margins.</p>`;
   }
   return banners;
+}
+
+// The entity report: one company's sales, costs, fees and stock, budget beside actual.
+function renderEntities() {
+  const detail = entityDetail(state.config, state.year, state.detailEntity, {
+    basis: state.detailBasis, period: state.period, revealed: state.revealed,
+  });
+  pageBody.innerHTML = renderEntityDetail({ detail, entities: legalEntities, calendar: monthStrip() });
 }
 
 function renderDashboard() {
@@ -1097,6 +1114,7 @@ function render() {
   renderHeader();
   if (state.view === 'brief') pageBody.innerHTML = renderBrief({ config: state.config, revealed: state.revealed });
   if (state.view === 'dashboard') renderDashboard();
+  if (state.view === 'entities') renderEntities();
   if (state.view === 'map') renderMap();
   if (state.view === 'pricing') {
     const review = reviewGoodsPricing(state.config, state.revealed);
@@ -1121,13 +1139,14 @@ function setView(view, { focus = false } = {}) {
 }
 
 function focusAfterRender(button) {
-  const { action, period, metric, filter, mapEntity } = button.dataset;
+  const { action, period, metric, filter, mapEntity, detailBasis } = button.dataset;
   const className = ['month-button', 'bar-group', 'table-select'].find((key) => button.classList.contains(key));
   const selector = action ? `[data-action="${action}"]`
     : period !== undefined && className ? `.${className}[data-period="${period}"]`
     : metric ? `[data-metric="${metric}"]`
     : filter ? `[data-filter="${filter}"]`
     : mapEntity ? `[data-map-entity="${mapEntity}"]`
+    : detailBasis ? `[data-detail-basis="${detailBasis}"]`
     : null;
   if (selector) document.querySelector(selector)?.focus({ preventScroll: true });
 }
@@ -1153,7 +1172,7 @@ document.addEventListener('click', (event) => {
     useGoodsPriceQuote(button);
     return;
   }
-  const { action, period, metric, filter, mapEntity } = button.dataset;
+  const { action, period, metric, filter, mapEntity, detailBasis } = button.dataset;
   if (action === 'run-year') {
     runFullYear();
     return;
@@ -1195,6 +1214,9 @@ document.addEventListener('click', (event) => {
     state.filter = filter;
   } else if (mapEntity) {
     state.mapEntity = state.mapEntity === mapEntity ? null : mapEntity;
+  } else if (detailBasis === 'month' || detailBasis === 'year') {
+    state.detailBasis = detailBasis;
+    announcement.textContent = detailBasis === 'year' ? 'Annual amounts shown.' : 'Monthly amounts shown.';
   } else {
     return;
   }
@@ -1226,6 +1248,14 @@ summaryDialog?.addEventListener('close', () => {
 
 pageBody.addEventListener('change', (event) => {
   const select = event.target;
+  if (select.matches('[data-detail-entity]')) {
+    if (!legalEntities.includes(select.value)) return;
+    state.detailEntity = select.value;
+    renderEntities();
+    document.querySelector('[data-detail-entity]').focus({ preventScroll: true });
+    announcement.textContent = `${ENTITIES[state.detailEntity].name} shown.`;
+    return;
+  }
   if (select.matches('[data-map-period]')) state.period = Number(select.value);
   else if (select.matches('[data-map-basis]')) state.mapBasis = select.value;
   else return;

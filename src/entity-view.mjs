@@ -1,0 +1,216 @@
+import { ENTITIES, PRODUCTS } from './engine.mjs';
+
+const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+const whole = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const rate = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 2 });
+const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const families = Object.keys(PRODUCTS);
+const stageNames = { wip: 'work in process', raw: 'raw materials' };
+// What each kind of intercompany charge is called on the page of the entity that earns it, and of the one that pays it.
+const revenueNames = {
+  US_SERVICES: 'Headquarters services to Switzerland',
+  RD_SERVICES: 'R&D services to the United States, at cost plus 10%',
+  PL_TOLL_FEE: 'Toll fee from Switzerland',
+  BE_WAREHOUSE: 'Warehouse fee from Switzerland',
+  IN_SERVICES: 'Service fee from the United States and Switzerland',
+  SERVICE_TRUE_UP: 'Year-end fee true-up',
+};
+// Listed in the order the charges are shown.
+const chargeNames = {
+  BE_WAREHOUSE: 'Belgian warehouse fee',
+  US_SERVICES: 'US headquarters services',
+  IN_SERVICES: 'India service fee',
+  SERVICE_TRUE_UP: 'India year-end fee true-up',
+  RD_SERVICES: 'R&D services from Germany and Poland, at cost plus 10%',
+};
+
+function html(value) {
+  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+const nameOf = id => ENTITIES[id]?.name ?? id;
+const money = value => `${value < -0.005 ? '−' : ''}${dollars.format(Math.abs(value) < 0.005 ? 0 : Math.abs(value))}`;
+
+// One side of a row: units, a value per unit and an amount. A side with nothing to show yet is null.
+function cells(side, kind) {
+  if (!side) return '<td>—</td><td>—</td><td>—</td>';
+  if (kind === 'percent') return `<td></td><td></td><td>${Number.isFinite(side.amount) ? percent.format(side.amount) : '—'}</td>`;
+  const units = side.units === undefined ? '' : whole.format(side.units);
+  // A row of units alone, such as units produced, has no value per unit.
+  const each = side.units === undefined || side.amount === undefined ? '' : side.units ? money(side.amount / side.units) : '—';
+  return `<td>${units}</td><td>${each}</td><td>${side.amount === undefined ? '' : money(side.amount)}</td>`;
+}
+
+function buildRows({ id, budget, actual }) {
+  const rows = [];
+  const sides = [budget, actual];
+  const heading = text => rows.push({ type: 'heading', text });
+  const sub = text => rows.push({ type: 'sub', text });
+  // `pick` reads one side. A row is left out when it is empty on both sides, unless `keep` is set.
+  const line = (label, pick, { type = 'line', kind, keep = false, indent = true } = {}) => {
+    const [planned, done] = sides.map(pick);
+    const empty = side => !side || (!side.units && Math.abs(side.amount ?? 0) < 0.005);
+    if (!keep && empty(planned) && empty(done)) return;
+    rows.push({ type, label, kind, indent, budget: planned, actual: done });
+  };
+  const amount = pick => side => ({ amount: pick(side) });
+  const sumOf = (list, pick) => list.reduce((total, item) => total + pick(item), 0);
+
+  // Goods sold, buyer by buyer, because each buyer pays its own price.
+  const buyers = [...new Map(sides.flatMap(side => side.sales).map(group => [group.buyer, group])).values()];
+  const goodsOf = side => side.sales.flatMap(group => Object.values(group.products));
+  const service = budget.service ?? actual.service;
+  const other = [...new Set(sides.flatMap(side => side.otherRevenue.map(entry => entry.policy)))];
+  heading('Net sales');
+  for (const { buyer, external } of buyers) {
+    sub(external ? 'To third-party customers' : `To ${nameOf(buyer)} (intercompany)`);
+    for (const family of families) {
+      line(PRODUCTS[family].name, side => side.sales.find(group => group.buyer === buyer)?.products[family] ?? { units: 0, amount: 0 }, { keep: true });
+    }
+  }
+  if (buyers.length) {
+    line('Goods net sales', side => ({ units: sumOf(goodsOf(side), entry => entry.units), amount: sumOf(goodsOf(side), entry => entry.amount) }), { type: 'subtotal', keep: true, indent: false });
+  }
+  if (service) {
+    // A service fee is shown as the cost it was set from and the markup on top.
+    const fixed = service.kind === 'fixed';
+    // Poland and India charge a fixed fee set from budgeted cost. The warehouse charges its actual cost plus a margin on the fee.
+    sub(fixed ? 'Fixed monthly service fee' : 'Warehouse fee on actual cost');
+    line(fixed ? 'Budgeted service cost' : 'Warehouse cost', amount(side => side.service.budgetCost), { keep: true });
+    line(fixed ? 'Markup' : 'Margin', amount(side => side.service.markup), { keep: true });
+    line(fixed ? 'Markup as a share of budgeted cost' : 'Margin as a share of the fee',
+      amount(side => fixed ? (side.service.budgetCost ? side.service.markup / side.service.budgetCost : NaN) : side.service.fee ? side.service.markup / side.service.fee : NaN), { kind: 'percent', keep: true });
+    line('Service fee charged', amount(side => side.service.fee), { type: 'subtotal', keep: true, indent: false });
+    line(revenueNames.SERVICE_TRUE_UP, amount(side => side.service.trueUp), { indent: false });
+  }
+  const feePolicies = new Set(['PL_TOLL_FEE', 'BE_WAREHOUSE', 'IN_SERVICES', 'SERVICE_TRUE_UP']);
+  for (const policy of other) {
+    if (service && feePolicies.has(policy)) continue;
+    const label = policy === 'CH_ROYALTY' ? `Royalty from Switzerland at ${rate.format(budget.royalty?.rate ?? actual.royalty?.rate ?? 0)}` : revenueNames[policy] ?? policy;
+    line(label, amount(side => side.otherRevenue.find(entry => entry.policy === policy)?.amount ?? 0), { keep: true, indent: false });
+  }
+  line('Year-end transfer price adjustments', amount(side => side.adjustmentRevenue), { indent: false });
+  line('Total revenue', amount(side => side.revenue), { type: 'total', keep: true, indent: false });
+
+  // Cost of sales: the units that left finished stock, at the value they were carried at.
+  if (buyers.length) {
+    heading('Cost of sales');
+    for (const family of families) line(PRODUCTS[family].name, side => side.costOfSales.products[family], { keep: true });
+    line('Year-end transfer price adjustments', amount(side => side.costOfSales.adjustments), { indent: false });
+    line(id === 'CH' ? 'Poland toll fee booked outside stock, including the year-end true-up' : 'Fees booked to cost of sales', amount(side => side.costOfSales.fees), { indent: false });
+    line('Customs duty on year-end adjustments', amount(side => side.costOfSales.other), { indent: false });
+    line('Total cost of sales', amount(side => side.costOfSales.total), { type: 'total', keep: true, indent: false });
+  }
+
+  heading('Operating expenses');
+  if (budget.royalty?.direction === 'paid' || actual.royalty?.direction === 'paid') {
+    sub('Royalty to the United States');
+    line('Royalty base: third-party sales of Switzerland and the limited-risk distributors', amount(side => side.royalty?.base ?? 0), { keep: true });
+    line(`Royalty at ${rate.format((budget.royalty ?? actual.royalty).rate)} of the base`, amount(side => side.royalty?.amount ?? 0), { type: 'subtotal', keep: true });
+  }
+  // A year-end true-up follows the fee it corrects.
+  const chargeOrder = Object.keys(chargeNames);
+  const charges = [...new Set(sides.flatMap(side => side.charges.map(entry => entry.policy)))].filter(policy => policy !== 'CH_ROYALTY')
+    .sort((left, right) => chargeOrder.indexOf(left) - chargeOrder.indexOf(right));
+  for (const policy of charges) {
+    line(chargeNames[policy] ?? policy, amount(side => side.charges.find(entry => entry.policy === policy)?.amount ?? 0), { keep: true, indent: false });
+  }
+  line(service ? 'Service cost incurred' : 'Own operating costs', amount(side => side.ownCosts), { keep: true, indent: false });
+  line('Own R&D cost', amount(side => side.ownResearch), { indent: false });
+  line('Total operating expenses', amount(side => side.operatingExpenses), { type: 'total', keep: true, indent: false });
+
+  heading('Result');
+  line('Operating profit', amount(side => side.operatingProfit), { type: 'total', keep: true, indent: false });
+  line('Operating margin on revenue', amount(side => side.revenue ? side.operatingProfit / side.revenue : NaN), { kind: 'percent', keep: true, indent: false });
+  if (service?.kind === 'fixed') {
+    line('Markup earned on service cost incurred', amount(side => side.service.cost ? (side.service.fee + side.service.trueUp) / side.service.cost - 1 : NaN), { kind: 'percent', keep: true, indent: false });
+  }
+
+  // Stock at the two ends of the period, at the value it is carried at.
+  const stockNames = stock => stock ? stock.map(({ stage, product }) => stage + '/' + product) : [];
+  const bins = [...new Set(sides.flatMap(side => [...stockNames(side.inventory?.opening), ...stockNames(side.inventory?.closing)]))];
+  heading('Inventory');
+  if (!bins.length) rows.push({ type: 'note', text: id === 'PL' ? 'Holds no inventory. The goods it converts belong to Switzerland.' : 'Holds no inventory.' });
+  const finished = sides.flatMap(side => Object.values(side.received)).some(entry => entry.units);
+  for (const [end, title] of [['opening', 'Beginning of the period'], ['received', 'Finished goods received in the period'], ['closing', 'End of the period']]) {
+    if (!bins.length) break;
+    if (end === 'received') {
+      // Units made, converted or bought. Beginning stock plus these less cost of sales is ending stock.
+      if (!finished) continue;
+      sub(title);
+      for (const family of families) line(PRODUCTS[family].name, side => side.received[family], { keep: true });
+      line('Finished goods received', side => ({ units: sumOf(Object.values(side.received), entry => entry.units), amount: sumOf(Object.values(side.received), entry => entry.amount) }), { type: 'subtotal', keep: true, indent: false });
+      continue;
+    }
+    sub(title);
+    const stockOf = side => side.inventory?.[end] ?? null;
+    for (const name of bins) {
+      const [stage, product] = name.split('/');
+      line(`${PRODUCTS[product].name}${stage === 'finished' ? '' : `, ${stageNames[stage]}`}`,
+        side => stockOf(side) ? stockOf(side).find(row => row.stage === stage && row.product === product) ?? { units: 0, amount: 0 } : null, { keep: true });
+    }
+    line(end === 'opening' ? 'Beginning inventory' : 'Ending inventory',
+      side => stockOf(side) ? { units: sumOf(stockOf(side), row => row.units), amount: sumOf(stockOf(side), row => row.amount) } : null, { type: 'subtotal', keep: true, indent: false });
+  }
+
+  if (budget.made ?? actual.made) {
+    heading(id === 'PL' ? 'Units converted for Switzerland' : 'Units produced in the US plant');
+    for (const family of families) line(PRODUCTS[family].name, side => ({ units: side.made[family].units }), { keep: true });
+  }
+  return rows;
+}
+
+function rowHtml(row) {
+  // The text of a full-width row stays in view when a narrow screen scrolls the table sideways.
+  if (row.type === 'heading') return `<tr class="entity-heading"><th scope="colgroup" colspan="7"><span class="entity-stick">${html(row.text)}</span></th></tr>`;
+  if (row.type === 'sub') return `<tr class="entity-sub"><th scope="colgroup" colspan="7"><span class="entity-stick">${html(row.text)}</span></th></tr>`;
+  if (row.type === 'note') return `<tr class="entity-note"><td colspan="7"><span class="entity-stick">${html(row.text)}</span></td></tr>`;
+  return `<tr class="entity-${row.type}">
+    <th scope="row" class="${row.indent ? 'entity-indent' : ''}">${html(row.label)}</th>${cells(row.budget, row.kind)}${cells(row.actual, row.kind)}
+  </tr>`;
+}
+
+/**
+ * The entity detail report: one legal entity, by month or by year, budget beside actual.
+ * `entities` lists the ids the reader can choose from, and `calendar` is the month selector
+ * shown in the monthly view.
+ */
+export function renderEntityDetail({ detail, entities, calendar = '' }) {
+  const { id, basis, period, revealed } = detail;
+  const month = monthNames[period];
+  const budgetLabel = basis === 'year' ? 'Budget · full year 2027' : `Budget · ${month}`;
+  const actualLabel = basis === 'year'
+    ? revealed ? `Actual · year to date through ${monthNames[revealed - 1]}` : 'Actual · no months revealed yet'
+    : period < revealed ? `Actual · ${month}` : `Actual · ${month} not revealed yet`;
+  const explain = basis === 'year'
+    ? 'The budget column is the full year. The actual column adds up the months revealed so far.'
+    : 'An actual month shows zero until it is revealed.';
+  return `
+    <section class="panel entity-controls" aria-label="Choose what to show">
+      <label class="field">Legal entity
+        <select data-detail-entity>${entities.map(entity => `<option value="${html(entity)}" ${entity === id ? 'selected' : ''}>${html(nameOf(entity))} · ${html(ENTITIES[entity].role)}</option>`).join('')}</select>
+      </label>
+      <div class="entity-basis">
+        <span id="detail-basis-label">Amounts</span>
+        <div class="segmented" role="group" aria-labelledby="detail-basis-label">
+          <button type="button" data-detail-basis="month" aria-pressed="${basis === 'month'}">Monthly</button>
+          <button type="button" data-detail-basis="year" aria-pressed="${basis === 'year'}">Annual</button>
+        </div>
+      </div>
+    </section>
+    ${basis === 'month' ? calendar : ''}
+    <section class="panel entity-report" aria-labelledby="detail-heading">
+      <div class="panel-header"><div><h2 id="detail-heading">${html(nameOf(id))} · ${html(ENTITIES[id].role)}</h2>
+        <p class="subtitle">${basis === 'year' ? 'Full year 2027' : `${month} 2027`} · USD · US GAAP · ${explain}</p></div></div>
+      <div class="table-scroll" tabindex="0" role="region" aria-labelledby="detail-heading"><table class="entity-table">
+        <colgroup span="1"></colgroup><colgroup span="3"></colgroup><colgroup span="3"></colgroup>
+        <thead>
+          <tr><th scope="col" rowspan="2">Line</th><th scope="colgroup" colspan="3">${html(budgetLabel)}</th><th scope="colgroup" colspan="3" class="entity-actual">${html(actualLabel)}</th></tr>
+          <tr><th scope="col">Units</th><th scope="col">Per unit</th><th scope="col">Amount</th><th scope="col" class="entity-actual">Units</th><th scope="col">Per unit</th><th scope="col">Amount</th></tr>
+        </thead>
+        <tbody>${buildRows(detail).map(rowHtml).join('')}</tbody>
+      </table></div>
+      <p class="field-note panel-note">Each goods line is units times the value per unit. Net sales use the net sales price, and cost of sales and inventory use the value the units are carried at in stock, first in, first out. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard.</p>
+    </section>`;
+}
