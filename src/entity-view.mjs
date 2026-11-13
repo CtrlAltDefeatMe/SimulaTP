@@ -1,4 +1,4 @@
-import { ENTITIES, PRODUCTS } from './engine.mjs';
+import { ENTITIES, PRODUCTS, US_TAX_RULES } from './engine.mjs';
 
 const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const whole = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -169,6 +169,10 @@ function buildRows({ id, basis, budget, actual }, showLayers) {
   if (service?.kind === 'fixed') {
     line('Markup earned on service cost incurred', amount(side => side.service.cost ? (side.service.fee + side.service.trueUp) / side.service.cost - 1 : NaN), { kind: 'percent', keep: true, indent: false });
   }
+  if (budget.usTax) {
+    line('US income tax, federal and state, worked out below', amount(side => -side.usTax.total), { keep: true, indent: false });
+    line('Profit after tax', amount(side => side.operatingProfit - side.usTax.total), { type: 'total', keep: true, indent: false });
+  }
 
   // Stock at the two ends of the period, at the value it is carried at.
   const stockNames = stock => stock ? stock.map(({ stage, product }) => stage + '/' + product) : [];
@@ -207,7 +211,81 @@ function buildRows({ id, basis, budget, actual }, showLayers) {
     // A plant lists only the lines it makes.
     for (const family of families) line(PRODUCTS[family].name, side => ({ units: side.made[family].units }));
   }
+  if (budget.usTax) usTaxRows(sides, { heading, sub, line, amount, note: text => rows.push({ type: 'note', text }) });
   return rows;
+}
+
+// The US parent's income tax, step by step: taxable income, FDDEI, NCTI and BEAT.
+function usTaxRows(sides, { heading, sub, line, amount, note }) {
+  const rules = US_TAX_RULES;
+  const [budget] = sides;
+  const tax = pick => amount(side => pick(side.usTax));
+  const flat = { indent: false };
+  heading('US income tax');
+  note(`Federal tax at ${rate.format(rules.federalRate)} under the rules for tax years beginning after 2025, plus state tax at ${rate.format(budget.usTax.stateRate)} of operating profit. Worked out on the period’s figures as if they were a tax year. Every foreign subsidiary is treated as a controlled foreign corporation (CFC) wholly owned by the US parent. Taxable income is taken as US GAAP operating profit, with no interest and no credits other than the NCTI credit.`);
+
+  sub('Taxable income and tax');
+  line('Operating profit, US GAAP', tax(t => t.operatingProfit), { keep: true });
+  line('State income tax, deductible', tax(t => -t.state), { keep: true });
+  line('NCTI inclusion', tax(t => t.ncti.amount), { keep: true });
+  line('Section 78 gross-up', tax(t => t.ncti.grossUp), { keep: true });
+  line(`Section 250 deduction on FDDEI, ${rate.format(rules.fddeiDeduction)}`, tax(t => -t.fddei.deduction), { keep: true });
+  line(`Section 250 deduction on NCTI, ${rate.format(rules.nctiDeduction)}`, tax(t => -t.ncti.deduction), { keep: true });
+  line('Taxable income', tax(t => t.taxableIncome), { type: 'subtotal', keep: true, ...flat });
+  line(`Federal tax at ${rate.format(rules.federalRate)}`, tax(t => t.taxBeforeCredits), { keep: true });
+  line('Foreign tax credit on NCTI', tax(t => -t.credit), { keep: true });
+  line('Regular federal tax', tax(t => t.regularTax), { type: 'subtotal', keep: true, ...flat });
+  line('Base erosion and anti-abuse tax (BEAT)', tax(t => t.beat.amount), { keep: true });
+  line('State income tax', tax(t => t.state), { keep: true });
+  line('Total US income tax', tax(t => t.total), { type: 'total', keep: true, ...flat });
+  line('Effective rate on operating profit', tax(t => t.operatingProfit ? t.total / t.operatingProfit : NaN), { kind: 'percent', keep: true, ...flat });
+
+  sub('FDDEI: foreign-derived deduction eligible income');
+  line('Goods sold to Switzerland and Canada, resold to customers abroad', tax(t => t.fddei.goods), { keep: true });
+  line('Royalty from Switzerland, for use of the IP abroad', tax(t => t.fddei.royalty), { keep: true });
+  line('Headquarters services fee from Switzerland', tax(t => t.fddei.services), { keep: true });
+  line('Cost of goods sold on those goods', tax(t => -t.fddei.goodsCogs), { keep: true });
+  line('Headquarters services cost, allocated to the fee', tax(t => -t.fddei.servicesCost), { keep: true });
+  line('Other operating expenses and state tax, apportioned on gross receipts', tax(t => -t.fddei.apportionedToForeign), { keep: true });
+  line('Foreign-derived share of gross receipts', tax(t => t.fddei.receipts ? t.fddei.foreignShare : NaN), { kind: 'percent', keep: true });
+  line('R&D expense, not allocated (memo)', tax(t => t.fddei.research), { keep: true });
+  line('FDDEI', tax(t => t.fddei.income), { type: 'subtotal', keep: true, ...flat });
+  line('Deduction eligible income from all US sales (memo)', tax(t => t.fddei.dei), { keep: true });
+  line('Cut back by the taxable income limit', tax(t => t.fddei.allowed - t.fddei.base));
+  line(`Section 250 deduction at ${rate.format(rules.fddeiDeduction)}`, tax(t => t.fddei.deduction), { type: 'subtotal', keep: true, ...flat });
+
+  sub('NCTI: net CFC tested income, each CFC’s profit less its foreign income tax');
+  for (const id of budget.usTax.ncti.cfcs.map(cfc => cfc.id)) {
+    line(nameOf(id), tax(t => t.ncti.cfcs.find(cfc => cfc.id === id).tested), { keep: true });
+  }
+  line('Tested losses', tax(t => t.ncti.testedLoss));
+  line('NCTI, with no deduction for tangible assets', tax(t => t.ncti.amount), { type: 'subtotal', keep: true, ...flat });
+  line('Foreign income taxes on tested income', tax(t => t.ncti.testedTaxes), { keep: true });
+  line('Section 78 gross-up of those taxes', tax(t => t.ncti.grossUp), { keep: true });
+  line(`Section 250 deduction at ${rate.format(rules.nctiDeduction)}`, tax(t => -t.ncti.deduction), { keep: true });
+  line(`US tax on NCTI at ${rate.format(rules.federalRate)}`, tax(t => t.ncti.taxBeforeCredit), { keep: true });
+  line(`Deemed-paid credit, ${rate.format(rules.nctiCreditShare)} of the foreign taxes`, tax(t => t.ncti.deemedPaid), { keep: true });
+  line('Credit allowed, up to the US tax on NCTI', tax(t => t.ncti.credit), { keep: true });
+  line('Excess credit, lost with no carryover', tax(t => t.ncti.excessCredit), { keep: true });
+  line('Residual US tax on NCTI', tax(t => t.ncti.residual), { type: 'subtotal', keep: true, ...flat });
+
+  sub('BEAT: base erosion and anti-abuse tax');
+  line('R&D services from Germany and Poland, in full', tax(t => t.beat.research), { keep: true });
+  line('India service fee', tax(t => t.beat.indiaFee), { keep: true });
+  line('Less its cost, excepted under the services cost method', tax(t => -t.beat.indiaCost), { keep: true });
+  line('Base erosion tax benefits', tax(t => t.beat.benefits), { type: 'subtotal', keep: true, ...flat });
+  line('Deductions, excluding cost of goods sold, section 250 and the excepted cost', tax(t => t.beat.deductions), { keep: true });
+  line(`Base erosion percentage, ${rate.format(rules.beatThreshold)} threshold`, tax(t => t.beat.deductions ? t.beat.percentage : NaN), { kind: 'percent', keep: true });
+  line('Modified taxable income: taxable income plus base erosion tax benefits', tax(t => t.beat.modifiedTaxableIncome), { keep: true });
+  line(`Minimum tax at ${rate.format(rules.beatRate)}`, tax(t => t.beat.minimumTax), { keep: true });
+  line('Less regular federal tax after credits', tax(t => -t.regularTax), { keep: true });
+  line('BEAT', tax(t => t.beat.amount), { type: 'subtotal', keep: true, ...flat });
+  const reasons = new Set(sides.filter(side => side.usTax.beat.deductions && !side.usTax.beat.applies).map(side => !side.usTax.beat.grossReceiptsMet
+    ? 'the group is set below the $500 million gross receipts test in Scenario settings'
+    : `the base erosion percentage is below ${rate.format(rules.beatThreshold)}`));
+  note(reasons.size
+    ? `BEAT does not apply where ${[...reasons].join(', and where ')}.`
+    : 'BEAT applies: the case’s figures are scaled down from a group above the $500 million gross receipts test, which you can change in Scenario settings, and the base erosion percentage is above 3%. Goods bought from Switzerland enter cost of goods sold and are not base erosion payments.');
 }
 
 function rowHtml(row) {

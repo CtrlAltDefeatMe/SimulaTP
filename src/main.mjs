@@ -466,7 +466,7 @@ function taxPanel(budget, actual) {
   const { tax, customs } = summarizeTaxAndCustoms(state.config, [actual ?? budget]);
   const basis = `${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD`;
   return `<section class="panel" aria-labelledby="tax-heading">
-      <div class="panel-header"><div><h2 id="tax-heading">Income tax</h2><p class="subtitle">${basis} · each entity’s rate applied to its operating profit</p></div></div>
+      <div class="panel-header"><div><h2 id="tax-heading">Income tax</h2><p class="subtitle">${basis} · each entity’s rate applied to its operating profit · the United States under its federal rules</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="tax-heading"><table>
         <thead><tr><th scope="col">Entity</th><th scope="col">Operating profit</th><th scope="col">Tax rate</th><th scope="col">Income tax</th></tr></thead>
         <tbody>${TAXED_ENTITIES.map((id) => `<tr>
@@ -476,6 +476,7 @@ function taxPanel(budget, actual) {
         <tr class="total-row"><td class="table-name">All entities</td><td>${amount(tax.profit)}</td><td>${amount(tax.effectiveRate, formatPercent)}</td><td>${amount(tax.total)}</td></tr>
         </tbody>
       </table></div>
+      <p class="field-note panel-note">The United States pays federal tax at 21% with the deduction for foreign-derived deduction eligible income (FDDEI), tax on net CFC tested income (NCTI) less a 90% credit for the foreign taxes on it, and the base erosion and anti-abuse tax (BEAT), plus state tax. Its rate is the effective rate on its operating profit. <a href="#entities">Entity detail</a> for the United States shows the working.</p>
     </section>
     ${customsPanel(customs, basis)}`;
 }
@@ -1006,9 +1007,11 @@ function renderSettings() {
         <div class="panel-header"><div><h2 id="tax-settings-heading">Income tax</h2><p class="subtitle">Illustrative rates, as percentages</p></div></div>
         <div class="form-fields">
           <div class="rate-fields">
-            ${TAXED_ENTITIES.map((id) => `<label class="field">${html(labelFor(id))} income tax${numberInput(`tax.${id}`, percentInput(tax.rates[id]), { min: 0, max: 99 })}</label>`).join('')}
+            ${TAXED_ENTITIES.map((id) => `<label class="field">${html(labelFor(id))} income tax${id === 'US' ? ', federal 21% plus state' : ''}${numberInput(`tax.${id}`, percentInput(tax.rates[id]), { min: 0, max: 99 })}</label>`).join('')}
           </div>
-          <p class="field-note">Income tax is each entity’s rate applied to its operating profit, and to its local statutory profit once the year is closed.</p>
+          <p class="field-note">Income tax is each entity’s rate applied to its operating profit, and to its local statutory profit once the year is closed. The United States is different: it pays federal tax at 21% with FDDEI, NCTI and BEAT, and state tax at the rest of its rate.</p>
+          <label class="check-field"><input type="checkbox" name="tax.beatGrossReceipts" ${tax.beatGrossReceipts ?? true ? 'checked' : ''}> Treat the group as above BEAT’s $500 million gross receipts test</label>
+          <p class="field-note">The case’s figures are scaled down from a group of that size. Clear this to see the US tax with no BEAT.</p>
         </div>
       </section>
       <section class="panel" aria-labelledby="customs-settings-heading">
@@ -1052,6 +1055,7 @@ function readSettings(form) {
   for (const [kind, bound] of rangeFields) config.ranges[kind][bound] = Number(data.get(`range.${kind}.${bound}`)) / 100;
   for (const key of MARKET_SHOCK_KEYS) config.simulation.marketVariation[key] = Number(data.get(`marketVariation.${key}`)) / 100;
   for (const id of TAXED_ENTITIES) config.tax.rates[id] = Number(data.get(`tax.${id}`)) / 100;
+  config.tax.beatGrossReceipts = data.get('tax.beatGrossReceipts') === 'on';
   config.customs = { rates: Object.fromEntries(CUSTOMS_LANES.map(({ key }) => [
     key, Object.fromEntries(productFamilies.map(family => [family, Number(data.get(`duty.${key}.${family}`)) / 100])),
   ])) };

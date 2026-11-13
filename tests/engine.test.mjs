@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation, quarterly, unfilledDemand,
-  reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig,
+  reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig, US_TAX_RULES, usIncomeTax,
 } from '../src/engine.mjs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
 
@@ -601,15 +601,17 @@ test('income tax follows US GAAP profit during the year and local statutory prof
   const config = createConfig()
   const { actual } = runYear(config)
   const gaapProfit = (id, months) => months.reduce((profit, month) => profit + month.entities[id].operatingProfit, 0)
+  // Every entity but the US parent pays its own rate. The US is taxed under its federal rules.
+  const foreign = Object.keys(config.tax.rates).filter(id => id !== 'US')
   const nineMonths = actual.slice(0, 9)
   const interim = summarizeTaxAndCustoms(config, nineMonths).tax
-  const expectedInterim = Object.keys(config.tax.rates).reduce((sum, id) => sum + config.tax.rates[id] * gaapProfit(id, nineMonths), 0)
+  const expectedInterim = foreign.reduce((sum, id) => sum + config.tax.rates[id] * gaapProfit(id, nineMonths), 0) + usIncomeTax(config, nineMonths).total
   assert.ok(Math.abs(interim.total - expectedInterim) < 0.005)
   const { tax } = summarizeTaxAndCustoms(config, actual)
   const stat = actual[11].stat
-  const expected = Object.keys(config.tax.rates).reduce((sum, id) =>
-    sum + config.tax.rates[id] * (stat[id]?.operatingProfit ?? gaapProfit(id, actual)), 0)
+  const expected = foreign.reduce((sum, id) => sum + config.tax.rates[id] * stat[id].operatingProfit, 0) + usIncomeTax(config, actual, stat).total
   assert.ok(Math.abs(tax.total - expected) < 0.005)
+  assert.equal(tax.entities.US.tax, tax.entities.US.detail.total)
   assert.equal(stat.US, undefined)
   assert.ok(tax.effectiveRate > 0.15 && tax.effectiveRate < 0.30)
 })
@@ -1034,7 +1036,11 @@ test('the year rolls up into four quarters that add up to its twelve months', ()
       near(quarter.consolidated.operatingMargin, quarter.consolidated.operatingProfit / quarter.consolidated.revenue, `${label} margin`)
       near(quarter.royaltyBase, add(month => month.royaltyBase), `${label} royalty base`)
       near(quarter.customs.total, add(month => month.customs.total), `${label} duty`)
-      near(quarter.tax.total, add(month => month.tax.total), `${label} tax`)
+      // Tax at a flat rate adds up. The US parent's is worked out on the quarter as a whole.
+      for (const id of Object.keys(quarter.tax.entities).filter(id => id !== 'US')) {
+        near(quarter.tax.entities[id].tax, add(month => month.tax.entities[id].tax), `${label} ${id} tax`)
+      }
+      near(quarter.tax.entities.US.tax, usIncomeTax(config, months).total, `${label} US tax`)
       for (const id of ['PL', 'IN']) {
         near(quarter.services[id].fee, add(month => month.services[id].fee), `${label} ${id} fee`)
         near(quarter.services[id].cost, add(month => month.services[id].cost), `${label} ${id} cost`)
@@ -1160,4 +1166,99 @@ test('a service fee quoted by the quarter is charged a third each month', () => 
   assert.equal(cents(quarters.actual[0].services.IN.fee), cents(before.fee * 3))
   assert.throws(() => applyServiceFees(config, 3, { IN: -1 }), /nonnegative/)
   assert.throws(() => applyServiceFees(config, 3, { IN: Number.NaN }), /nonnegative/)
+})
+
+test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI credit and BEAT, plus state tax', () => {
+  const config = createConfig()
+  const { budget, actual } = runYear(config)
+  const rules = US_TAX_RULES
+  assert.deepEqual({ ...rules }, { federalRate: 0.21, fddeiDeduction: 0.3334, nctiDeduction: 0.40, nctiCreditShare: 0.90, beatRate: 0.105, beatThreshold: 0.03 })
+  const near = (left, right, label) => assert.ok(Math.abs(left - right) < 0.005, `${label}: ${left} against ${right}`)
+  const add = (months, pick) => months.reduce((sum, month) => sum + pick(month), 0)
+  for (const [months, stat] of [[budget, null], [actual, actual[11].stat], [actual.slice(0, 6), null]]) {
+    const tax = usIncomeTax(config, months, stat)
+    const us = add(months, month => month.entities.US.operatingProfit)
+    // State tax at the rest of the US rate, deductible for federal purposes.
+    near(tax.stateRate, config.tax.rates.US - 0.21, 'state rate')
+    near(tax.state, tax.stateRate * us, 'state')
+    // FDDEI: R&E is not allocated, so deduction eligible income is profit before R&D, less state tax.
+    near(tax.fddei.dei, us + add(months, month => month.entities.US.rdExpense) - tax.state, 'DEI')
+    near(tax.fddei.receipts, add(months, month => month.entities.US.revenue), 'gross receipts')
+    near(tax.fddei.income, tax.fddei.goods - tax.fddei.goodsCogs + tax.fddei.royalty + tax.fddei.services - tax.fddei.servicesCost - tax.fddei.apportionedToForeign, 'FDDEI')
+    assert.ok(tax.fddei.income > 0 && tax.fddei.income < tax.fddei.dei)
+    near(tax.fddei.deduction, 0.3334 * tax.fddei.allowed, 'FDDEI deduction')
+    // NCTI: every CFC's profit less its foreign tax, with no QBAI return; a 100% gross-up and a 90% credit.
+    near(tax.ncti.amount, tax.ncti.cfcs.reduce((sum, cfc) => sum + cfc.tested, 0), 'NCTI')
+    near(tax.ncti.grossUp, tax.ncti.testedTaxes, 'gross-up')
+    near(tax.ncti.deemedPaid, 0.9 * tax.ncti.testedTaxes, 'deemed paid')
+    near(tax.ncti.deduction, 0.4 * (tax.ncti.amount + tax.ncti.grossUp), 'NCTI deduction')
+    // The CFCs pay more than 14% on average, so the credit covers the US tax on NCTI and the rest is lost.
+    assert.ok(tax.ncti.testedTaxes / (tax.ncti.amount + tax.ncti.grossUp) > 0.14)
+    near(tax.ncti.credit, 0.21 * 0.6 * (tax.ncti.amount + tax.ncti.grossUp), 'credit')
+    assert.ok(tax.ncti.excessCredit > 0)
+    near(tax.ncti.residual, 0, 'residual')
+    // Taxable income and regular tax.
+    near(tax.taxableIncome, us - tax.state + tax.ncti.amount + tax.ncti.grossUp - tax.fddei.deduction - tax.ncti.deduction, 'taxable income')
+    near(tax.regularTax, 0.21 * tax.taxableIncome - tax.ncti.credit, 'regular tax')
+    // BEAT: the R&D services in full and India's markup are base erosion payments. India's cost is excepted.
+    near(tax.beat.research, add(months, month => month.transactions.filter(line => line.policy === 'RD_SERVICES').reduce((sum, line) => sum + line.amount, 0)), 'R&D services')
+    near(tax.beat.indiaMarkup, tax.beat.indiaFee - tax.beat.indiaCost, 'India markup')
+    near(tax.beat.percentage, tax.beat.benefits / tax.beat.deductions, 'base erosion percentage')
+    assert.ok(tax.beat.percentage > 0.03 && tax.beat.applies)
+    near(tax.beat.modifiedTaxableIncome, tax.taxableIncome + tax.beat.benefits, 'MTI')
+    near(tax.beat.amount, Math.max(0, 0.105 * tax.beat.modifiedTaxableIncome - tax.regularTax), 'BEAT')
+    near(tax.total, tax.regularTax + tax.beat.amount + tax.state, 'total')
+  }
+  // In the default year BEAT binds: the NCTI credit lowers regular tax, but NCTI still counts in modified taxable income.
+  const year = usIncomeTax(config, budget)
+  assert.ok(year.beat.amount > 0)
+  // Below the gross receipts test, or with no base erosion payments to speak of, there is no BEAT.
+  const small = { ...createConfig(), tax: { ...createConfig().tax, beatGrossReceipts: false } }
+  const noBeat = usIncomeTax(small, runYear(small).budget)
+  assert.equal(noBeat.beat.amount, 0)
+  near(noBeat.total, noBeat.regularTax + noBeat.state, 'without BEAT')
+  const domesticResearch = { ...createConfig(), rd: { salesRate: 0.04, usShare: 1 } }
+  const homeGrown = usIncomeTax(domesticResearch, runYear(domesticResearch).budget)
+  assert.equal(homeGrown.beat.research, 0)
+  assert.ok(homeGrown.beat.percentage < 0.03 && !homeGrown.beat.applies && homeGrown.beat.amount === 0)
+  // A low-taxed CFC leaves residual US tax on NCTI: here every foreign rate is 5%.
+  const lowTax = createConfig()
+  for (const id of Object.keys(lowTax.tax.rates)) if (id !== 'US') lowTax.tax.rates[id] = 0.05
+  const residual = usIncomeTax(lowTax, runYear(lowTax).budget)
+  assert.ok(residual.ncti.residual > 0 && residual.ncti.excessCredit === 0)
+  near(residual.ncti.residual, 0.21 * 0.6 * (residual.ncti.amount + residual.ncti.grossUp) - 0.9 * residual.ncti.testedTaxes, 'residual')
+  // The group's tax and the Transfer prices page use the same figure.
+  near(summarizeTaxAndCustoms(config, budget).tax.entities.US.tax, year.total, 'group tax')
+  const review = reviewGoodsPricing(config, 12)
+  near(review.entityResults.find(row => row.id === 'US').tax.fullYear, usIncomeTax(config, actual, actual[11].stat).total, 'pricing page')
+  // The setting is validated and a saved scenario without it takes the default.
+  assert.throws(() => runYear({ ...createConfig(), tax: { ...createConfig().tax, beatGrossReceipts: 'yes' } }), /gross receipts/)
+  assert.equal(upgradeConfig({ ...createConfig(), tax: { rates: { ...createConfig().tax.rates } } }, true).tax.beatGrossReceipts, true)
+})
+
+test('the section 250 deduction is limited to taxable income', () => {
+  // With R&D at 10% of sales, all of it in the US, US profit is small and the deductions are cut back.
+  const config = { ...createConfig(), rd: { salesRate: 0.10, usShare: 1 } }
+  delete config.annualOperatingMargin
+  const tax = usIncomeTax(config, runYear(config).budget)
+  const claimed = tax.fddei.base + tax.ncti.amount + tax.ncti.grossUp
+  if (tax.beforeDeduction < claimed) {
+    assert.ok(tax.limitShare < 1)
+    assert.ok(Math.abs(tax.fddei.allowed + tax.ncti.allowed - Math.max(0, tax.beforeDeduction)) < 0.005)
+  } else {
+    assert.equal(tax.limitShare, 1)
+  }
+  assert.ok(tax.taxableIncome >= -0.005)
+})
+
+test('the entity detail report carries the US tax computation for the United States only', () => {
+  const config = createConfig()
+  const year = runYear(config)
+  const us = entityDetail(config, year, 'US', { basis: 'year', revealed: 12 })
+  assert.equal(us.budget.usTax.total, usIncomeTax(config, year.budget).total)
+  assert.equal(us.actual.usTax.total, usIncomeTax(config, year.actual, year.actual[11].stat).total)
+  const quarter = entityDetail(config, year, 'US', { basis: 'quarter', period: 1, revealed: 3 })
+  assert.equal(quarter.budget.usTax.total, usIncomeTax(config, year.budget.slice(3, 6)).total)
+  assert.equal(quarter.actual.usTax.total, 0)
+  for (const id of ['CH', 'DE', 'PL', 'IN']) assert.equal(entityDetail(config, year, id, { basis: 'year', revealed: 12 }).actual.usTax, null)
 })
