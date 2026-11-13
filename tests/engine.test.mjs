@@ -5,6 +5,7 @@ import {
   applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation, quarterly, unfilledDemand,
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig, US_TAX_RULES, usIncomeTax,
 } from '../src/engine.mjs'
+import { renderEntityDetail } from '../src/entity-view.mjs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
 
 const cents = value => Math.round(value * 100) / 100
@@ -1266,4 +1267,10 @@ test('the entity detail report carries the US tax computation for the United Sta
   assert.equal(quarter.budget.usTax.total, usIncomeTax(config, year.budget.slice(3, 6)).total)
   assert.equal(quarter.actual.usTax.total, 0)
   for (const id of ['CH', 'DE', 'PL', 'IN']) assert.equal(entityDetail(config, year, id, { basis: 'year', revealed: 12 }).actual.usTax, null)
+  // The computation has its own table with one amount column a side, so it reads on a phone.
+  const page = renderEntityDetail({ detail: us, entities: ['US', 'DE'] })
+  const taxTable = page.slice(page.indexOf('entity-tax-table'))
+  assert.ok(taxTable.includes('Total US income tax') && !taxTable.includes('Per unit, USD'))
+  assert.equal((taxTable.match(/<tr class="entity-total"><th[^>]*>Total US income tax<\/th>(<td>[^<]*<\/td>)+<\/tr>/)?.[1] ?? '').length > 0, true)
+  assert.equal(renderEntityDetail({ detail: entityDetail(config, year, 'DE', { basis: 'year', revealed: 12 }), entities: ['US', 'DE'] }).includes('entity-tax-table'), false)
 })

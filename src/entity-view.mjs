@@ -67,11 +67,11 @@ function layerLabel(id, stage, layer, showOrigin) {
   return `${base}${origin}${layer.n ? ` · lot ${layer.n + 1}` : ''}`;
 }
 
-function buildRows({ id, basis, budget, actual }, showLayers) {
-  const rows = [];
-  const sides = [budget, actual];
+// Helpers that add rows to `rows`, reading the budget and actual sides.
+function rowHelpers(sides, rows) {
   const heading = text => rows.push({ type: 'heading', text });
   const sub = text => rows.push({ type: 'sub', text });
+  const note = text => rows.push({ type: 'note', text });
   // `pick` reads one side. A row is left out when it is empty on both sides, unless `keep` is set.
   const line = (label, pick, { type = 'line', kind, keep = false, indent = true } = {}) => {
     const [planned, done] = sides.map(pick);
@@ -80,6 +80,13 @@ function buildRows({ id, basis, budget, actual }, showLayers) {
     rows.push({ type, label, kind, indent, budget: planned, actual: done });
   };
   const amount = pick => side => ({ amount: pick(side) });
+  return { heading, sub, note, line, amount };
+}
+
+function buildRows({ id, basis, budget, actual }, showLayers) {
+  const rows = [];
+  const sides = [budget, actual];
+  const { heading, sub, line, amount } = rowHelpers(sides, rows);
   const sumOf = (list, pick) => list.reduce((total, item) => total + pick(item), 0);
   // Where the units were made is named only when this entity holds goods of both origins at different duty.
   const stockLines = side => [...Object.values(side.costOfSales.products), ...Object.values(side.received), ...(side.inventory?.opening ?? []), ...(side.inventory?.closing ?? [])];
@@ -214,17 +221,20 @@ function buildRows({ id, basis, budget, actual }, showLayers) {
     // A plant lists only the lines it makes.
     for (const family of families) line(PRODUCTS[family].name, side => ({ units: side.made[family].units }));
   }
-  if (budget.usTax) usTaxRows(sides, { heading, sub, line, amount, note: text => rows.push({ type: 'note', text }) });
   return rows;
 }
 
 // The US parent's income tax, step by step: taxable income, FDDEI, NCTI and BEAT.
-function usTaxRows(sides, { heading, sub, line, amount, note }) {
+// It has amounts only, so it gets its own table with one amount column a side: on a phone the
+// amounts then sit beside their labels instead of off to the right of the units and prices.
+function buildTaxRows({ budget, actual }) {
+  if (!budget.usTax) return [];
+  const rows = [];
+  const sides = [budget, actual];
+  const { sub, line, amount, note } = rowHelpers(sides, rows);
   const rules = US_TAX_RULES;
-  const [budget] = sides;
   const tax = pick => amount(side => pick(side.usTax));
   const flat = { indent: false };
-  heading('US income tax');
   note(`Federal tax at ${rate.format(rules.federalRate)} under the rules for tax years beginning after 2025, plus state tax at ${rate.format(budget.usTax.stateRate)} of operating profit. Worked out on the period’s figures as if they were a tax year. Every foreign subsidiary is treated as a controlled foreign corporation (CFC) wholly owned by the US parent. Taxable income is taken as US GAAP operating profit, with no interest and no credits other than the NCTI credit.`);
 
   sub('Taxable income and tax');
@@ -289,16 +299,26 @@ function usTaxRows(sides, { heading, sub, line, amount, note }) {
   note(reasons.size
     ? `BEAT does not apply where ${[...reasons].join(', and where ')}.`
     : `BEAT applies: the US parent’s gross receipts, ${realSize.format(budget.usTax.beat.grossReceipts)} a year in the budget, are above the ${realSize.format(rules.beatGrossReceipts)} test, and the base erosion percentage is above ${rate.format(rules.beatThreshold)}. The test averages three prior years; the model takes this year’s receipts. Goods bought from Switzerland enter cost of goods sold and are not base erosion payments.`);
+  return rows;
 }
 
-function rowHtml(row) {
+function rowHtml(row, span = 7) {
   // The text of a full-width row stays in view when a narrow screen scrolls the table sideways.
-  if (row.type === 'heading') return `<tr class="entity-heading"><th scope="colgroup" colspan="7"><span class="entity-stick">${html(row.text)}</span></th></tr>`;
-  if (row.type === 'sub') return `<tr class="entity-sub"><th scope="colgroup" colspan="7"><span class="entity-stick">${html(row.text)}</span></th></tr>`;
-  if (row.type === 'note') return `<tr class="entity-note"><td colspan="7"><span class="entity-stick">${html(row.text)}</span></td></tr>`;
+  if (row.type === 'heading') return `<tr class="entity-heading"><th scope="colgroup" colspan="${span}"><span class="entity-stick">${html(row.text)}</span></th></tr>`;
+  if (row.type === 'sub') return `<tr class="entity-sub"><th scope="colgroup" colspan="${span}"><span class="entity-stick">${html(row.text)}</span></th></tr>`;
+  if (row.type === 'note') return `<tr class="entity-note"><td colspan="${span}"><span class="entity-stick">${html(row.text)}</span></td></tr>`;
+  const label = `<th scope="row" class="${row.indent ? 'entity-indent' : ''}">${html(row.label)}</th>`;
+  if (span === 3) return `<tr class="entity-${row.type}">${label}${amountCell(row.budget, row.kind)}${amountCell(row.actual, row.kind)}</tr>`;
   return `<tr class="entity-${row.type}">
-    <th scope="row" class="${row.indent ? 'entity-indent' : ''}">${html(row.label)}</th>${cells(row.budget, row.kind)}${cells(row.actual, row.kind)}
+    ${label}${cells(row.budget, row.kind)}${cells(row.actual, row.kind)}
   </tr>`;
+}
+
+// One amount for one side, for a table with no units or prices.
+function amountCell(side, kind) {
+  if (!side) return '<td>—</td>';
+  if (kind === 'percent') return `<td>${Number.isFinite(side.amount) ? percent.format(side.amount) : '—'}</td>`;
+  return `<td>${money(side.amount)}</td>`;
 }
 
 /**
@@ -315,6 +335,8 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
   const actualLabel = basis === 'year'
     ? closed ? `Actual · year to date through Q${closed}` : 'Actual · no quarters revealed yet'
     : period < closed ? `Actual · ${quarter}` : `Actual · ${quarter} not revealed yet`;
+  const when = basis === 'year' ? 'Full year 2027' : `${quarter} 2027 (${quarterSpans[period]})`;
+  const taxRows = buildTaxRows(detail);
   const explain = basis === 'year'
     ? 'The budget column is the full year. The actual column adds up the quarters revealed so far.'
     : 'An actual quarter shows zero until it is revealed.';
@@ -341,7 +363,7 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
     ${basis === 'quarter' ? calendar : ''}
     <section class="panel entity-report" aria-labelledby="detail-heading">
       <div class="panel-header"><div><h2 id="detail-heading">${html(nameOf(id))} · ${html(ENTITIES[id].role)}</h2>
-        <p class="subtitle">${basis === 'year' ? 'Full year 2027' : `${quarter} 2027 (${quarterSpans[period]})`} · ${IN_THOUSANDS}, units in thousands · US GAAP · ${explain}</p></div></div>
+        <p class="subtitle">${when} · ${IN_THOUSANDS}, units in thousands · US GAAP · ${explain}</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="detail-heading"><table class="entity-table">
         <colgroup span="1"></colgroup><colgroup span="3"></colgroup><colgroup span="3"></colgroup>
         <thead>
@@ -353,5 +375,13 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
       <p class="field-note panel-note">Units are in thousands and amounts in ${IN_THOUSANDS}, so the value per unit is in dollars. Each goods line is units times the value per unit. Net sales use the net sales price. Cost of sales and inventory use the value the units are carried at in stock, first in, first out: the oldest layer is sold first. ${layers
         ? 'A layer is the units that came in at one value. For a distributor that is a quarter’s purchases at that quarter’s transfer price plus any customs duty. The plants’ cost moves every month, so their layers are by month. A product line’s value per unit is the average of its layers.'
         : 'Turn on stock layers to see the purchases and prices behind each average.'} To trace a transfer price change, find the new price under Finished goods received in the quarter it takes effect, then follow that layer into cost of sales as the older layers are sold. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard.</p>
-    </section>`;
+    </section>${taxRows.length ? `
+    <section class="panel entity-report" aria-labelledby="tax-heading">
+      <div class="panel-header"><div><h2 id="tax-heading">US income tax</h2>
+        <p class="subtitle">${when} · ${IN_THOUSANDS} · taxable income, FDDEI, NCTI and BEAT</p></div></div>
+      <div class="table-scroll" tabindex="0" role="region" aria-labelledby="tax-heading"><table class="entity-table entity-tax-table">
+        <thead><tr><th scope="col">Line</th><th scope="col">${html(budgetLabel)}</th><th scope="col" class="entity-actual">${html(actualLabel)}</th></tr></thead>
+        <tbody>${taxRows.map(row => rowHtml(row, 3)).join('')}</tbody>
+      </table></div>
+    </section>` : ''}`;
 }
