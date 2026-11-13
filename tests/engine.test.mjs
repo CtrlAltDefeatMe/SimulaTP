@@ -1172,7 +1172,7 @@ test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI
   const config = createConfig()
   const { budget, actual } = runYear(config)
   const rules = US_TAX_RULES
-  assert.deepEqual({ ...rules }, { federalRate: 0.21, fddeiDeduction: 0.3334, nctiDeduction: 0.40, nctiCreditShare: 0.90, beatRate: 0.105, beatThreshold: 0.03 })
+  assert.deepEqual({ ...rules }, { federalRate: 0.21, fddeiDeduction: 0.3334, nctiDeduction: 0.40, nctiCreditShare: 0.90, beatRate: 0.105, beatThreshold: 0.03, beatGrossReceipts: 500_000 })
   const near = (left, right, label) => assert.ok(Math.abs(left - right) < 0.005, `${label}: ${left} against ${right}`)
   const add = (months, pick) => months.reduce((sum, month) => sum + pick(month), 0)
   for (const [months, stat] of [[budget, null], [actual, actual[11].stat], [actual.slice(0, 6), null]]) {
@@ -1204,6 +1204,9 @@ test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI
     near(tax.beat.research, add(months, month => month.transactions.filter(line => line.policy === 'RD_SERVICES').reduce((sum, line) => sum + line.amount, 0)), 'R&D services')
     near(tax.beat.indiaMarkup, tax.beat.indiaFee - tax.beat.indiaCost, 'India markup')
     near(tax.beat.percentage, tax.beat.benefits / tax.beat.deductions, 'base erosion percentage')
+    // Gross receipts are in USD thousands and annualized for a part year. The parent is well above $500 million.
+    near(tax.beat.grossReceipts, add(months, month => month.entities.US.revenue) * 12 / add(months, month => month.months?.length ?? 1), 'gross receipts test')
+    assert.ok(tax.beat.grossReceiptsMet)
     assert.ok(tax.beat.percentage > 0.03 && tax.beat.applies)
     near(tax.beat.modifiedTaxableIncome, tax.taxableIncome + tax.beat.benefits, 'MTI')
     near(tax.beat.amount, Math.max(0, 0.105 * tax.beat.modifiedTaxableIncome - tax.regularTax), 'BEAT')
@@ -1213,8 +1216,11 @@ test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI
   const year = usIncomeTax(config, budget)
   assert.ok(year.beat.amount > 0)
   // Below the gross receipts test, or with no base erosion payments to speak of, there is no BEAT.
-  const small = { ...createConfig(), tax: { ...createConfig().tax, beatGrossReceipts: false } }
-  const noBeat = usIncomeTax(small, runYear(small).budget)
+  const small = structuredClone(budget)
+  for (const month of small) month.entities.US.revenue = 40_000 / small.length
+  const noBeat = usIncomeTax(config, small)
+  near(noBeat.beat.grossReceipts, 40_000, 'small gross receipts')
+  assert.ok(!noBeat.beat.grossReceiptsMet && !noBeat.beat.applies)
   assert.equal(noBeat.beat.amount, 0)
   near(noBeat.total, noBeat.regularTax + noBeat.state, 'without BEAT')
   const domesticResearch = { ...createConfig(), rd: { salesRate: 0.04, usShare: 1 } }
@@ -1231,9 +1237,8 @@ test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI
   near(summarizeTaxAndCustoms(config, budget).tax.entities.US.tax, year.total, 'group tax')
   const review = reviewGoodsPricing(config, 12)
   near(review.entityResults.find(row => row.id === 'US').tax.fullYear, usIncomeTax(config, actual, actual[11].stat).total, 'pricing page')
-  // The setting is validated and a saved scenario without it takes the default.
-  assert.throws(() => runYear({ ...createConfig(), tax: { ...createConfig().tax, beatGrossReceipts: 'yes' } }), /gross receipts/)
-  assert.equal(upgradeConfig({ ...createConfig(), tax: { rates: { ...createConfig().tax.rates } } }, true).tax.beatGrossReceipts, true)
+  // A scenario saved with the old on/off setting drops it: the test now runs on the parent's receipts.
+  assert.equal('beatGrossReceipts' in upgradeConfig({ ...createConfig(), tax: { ...createConfig().tax, beatGrossReceipts: false } }, true).tax, false)
 })
 
 test('the section 250 deduction is limited to taxable income', () => {

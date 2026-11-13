@@ -123,9 +123,10 @@ export const US_TAX_RULES = Object.freeze({
   fddeiDeduction: 0.3334, nctiDeduction: 0.40,
   // Share of the foreign income taxes on tested income that is deemed paid and creditable.
   nctiCreditShare: 0.90,
-  // Base erosion and anti-abuse tax: the rate on modified taxable income, and the base
-  // erosion percentage at or above which it applies.
-  beatRate: 0.105, beatThreshold: 0.03,
+  // Base erosion and anti-abuse tax: the rate on modified taxable income, the base erosion
+  // percentage at or above which it applies, and the annual gross receipts it needs, in
+  // thousands of dollars like every amount in the model.
+  beatRate: 0.105, beatThreshold: 0.03, beatGrossReceipts: 500_000,
 })
 // Customs territories. The EU, Switzerland and the United Kingdom are treated as one block.
 export const CUSTOMS_BLOCKS = {
@@ -200,9 +201,7 @@ export function createConfig() {
     services: { polandFixedShare: 0.4 },
     annualOperatingMargin: DEFAULT_ANNUAL_MARGIN,
     rd: { salesRate: DEFAULT_RD_RATE, usShare: 0.5 },
-    // The case's figures are scaled down from a group above BEAT's $500 million gross
-    // receipts test. Set `beatGrossReceipts` to false to treat the group as below it.
-    tax: { rates: { ...DEFAULT_TAX_RATES }, beatGrossReceipts: true },
+    tax: { rates: { ...DEFAULT_TAX_RATES } },
     customs: { rates: dutyRates(key => DEFAULT_DUTY_RATES[key]) },
     // Optional rule: no goods transfer price may fall below standard cost plus this markup.
     priceFloor: { enabled: false, markup: 0.05 },
@@ -224,6 +223,8 @@ export function upgradeConfig(config, started) {
   const upgraded = { ...config }
   for (const key of ['tax', 'customs', 'priceFloor', 'services', 'serviceFeeSchedule']) upgraded[key] ??= defaults[key]
   upgraded.tax = { ...defaults.tax, ...upgraded.tax }
+  // BEAT's gross receipts test used to be a setting. It is now worked out from the US parent's receipts.
+  delete upgraded.tax.beatGrossReceipts
   upgraded.ranges = { ...defaults.ranges, ...upgraded.ranges }
   upgraded.yearEnd = { ...defaults.yearEnd, ...upgraded.yearEnd }
   // A scenario saved before R&D existed ran without it.
@@ -357,9 +358,6 @@ function validateConfig(config) {
   const taxRates = config.tax?.rates
   if (taxRates !== undefined && TAXED_ENTITIES.some(id => !Number.isFinite(taxRates[id]) || taxRates[id] < 0 || taxRates[id] >= 1)) {
     throw new RangeError('Each income tax rate must be between 0% and less than 100%.')
-  }
-  if (config.tax?.beatGrossReceipts !== undefined && typeof config.tax.beatGrossReceipts !== 'boolean') {
-    throw new RangeError('The BEAT gross receipts test must be met or not met.')
   }
   const duties = config.customs?.rates
   if (duties !== undefined && CUSTOMS_LANES.some(({ key }) => FAMILIES.some((family) => {
@@ -1196,7 +1194,10 @@ export function usIncomeTax(config, months, stat = null) {
   // goods sold, the section 250 deduction and the excepted service cost.
   const deductions = us.otherOperatingExpenses + us.rdExpense + state - indiaCost
   const baseErosionPercentage = deductions > 0 ? baseErosionBenefits / deductions : 0
-  const grossReceiptsMet = config.tax?.beatGrossReceipts ?? true
+  // The test averages three prior years. The model has one, so it takes this one, scaled to a full year.
+  const monthsCovered = sum(months.map(month => month.months?.length ?? 1))
+  const grossReceipts = monthsCovered ? us.revenue * 12 / monthsCovered : 0
+  const grossReceiptsMet = grossReceipts >= rules.beatGrossReceipts
   const beatApplies = grossReceiptsMet && baseErosionPercentage >= rules.beatThreshold
   const modifiedTaxableIncome = taxableIncome + baseErosionBenefits
   const minimumTax = rules.beatRate * Math.max(0, modifiedTaxableIncome)
@@ -1218,7 +1219,7 @@ export function usIncomeTax(config, months, stat = null) {
     limitShare, beforeDeduction, taxableIncome, taxBeforeCredits, credit, regularTax,
     beat: {
       research, indiaFee: total(india), indiaCost, indiaMarkup, benefits: baseErosionBenefits, deductions,
-      percentage: baseErosionPercentage, grossReceiptsMet, applies: beatApplies, modifiedTaxableIncome, minimumTax, amount: beat,
+      percentage: baseErosionPercentage, grossReceipts, grossReceiptsMet, applies: beatApplies, modifiedTaxableIncome, minimumTax, amount: beat,
     },
     federal: regularTax + beat,
     total: regularTax + beat + state,

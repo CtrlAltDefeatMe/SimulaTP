@@ -24,7 +24,7 @@ The simulator uses a synthetic scenario. Tax and duty rates are illustrative. Sc
 - US federal tax under the rules for tax years beginning after 2025: the FDDEI deduction (33.34%, with no interest or R&E allocated), tax on net CFC tested income (NCTI: 40% deduction, 90% deemed-paid credit, no QBAI return) and BEAT (10.5%, 3% base erosion percentage), plus state tax. The working is on Entity detail for the United States
 - Income tax by entity, and customs duty on declared transfer prices. The importer adds duty to the cost of the goods, so it reaches cost of sales when they are sold. Duty rates are set by importing block (Europe including Switzerland and the United Kingdom, the United States, Canada, Asia), by where the goods were made (United States or Poland) and by product line
 
-All amounts are in US dollars. There is no currency layer.
+All amounts are in thousands of US dollars and all unit counts are in thousands, so a price per unit is in dollars. Amounts show as whole numbers; headline figures show the real size, such as $2.38B. There is no currency layer.
 
 ## Tests
 

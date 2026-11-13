@@ -226,6 +226,7 @@ tbody tr:hover td, .selected-row td { background: #f4f9fe; }
 .entity-basis { display: grid; gap: 5px; color: var(--secondary); font-size: 12px; font-weight: 650; }
 .entity-table thead tr:first-child th[colspan] { text-align: center; border-bottom-color: var(--border); }
 .entity-table thead th { vertical-align: bottom; }
+.entity-table thead tr + tr th { white-space: normal; min-width: 92px; }
 .entity-table th[scope="row"] { min-width: 250px; max-width: 420px; background: transparent; color: var(--text); font-weight: 500; white-space: normal; }
 .entity-table th.entity-indent { padding-left: 38px; }
 .entity-table td:nth-child(5), .entity-table th.entity-actual { border-left: 1px solid var(--border); }

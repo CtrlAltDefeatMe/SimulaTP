@@ -1,7 +1,9 @@
 import { ENTITIES, PRODUCTS, US_TAX_RULES } from './engine.mjs';
+import { IN_THOUSANDS, realSize, thousands, unitCount, unitPrice } from './format.mjs';
 
-const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-const whole = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+// Amounts are in thousands of dollars and units in thousands, so a value per unit is in dollars.
+const dollars = thousands;
+const whole = unitCount;
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const rate = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 2 });
 const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -31,7 +33,8 @@ function html(value) {
 }
 
 const nameOf = id => ENTITIES[id]?.name ?? id;
-const money = value => `${value < -0.005 ? '−' : ''}${dollars.format(Math.abs(value) < 0.005 ? 0 : Math.abs(value))}`;
+const money = value => `${value <= -0.5 ? '−' : ''}${dollars.format(Math.abs(value))}`;
+const price = value => `${value <= -0.005 ? '−' : ''}${unitPrice.format(Math.abs(value))}`;
 
 // One side of a row: units, a value per unit and an amount. A side with nothing to show yet is null.
 function cells(side, kind) {
@@ -41,10 +44,10 @@ function cells(side, kind) {
   if (kind === 'percent') return `<td></td><td></td><td>${Number.isFinite(side.amount) ? percent.format(side.amount) : '—'}</td>`;
   const units = side.units === undefined ? '' : whole.format(side.units);
   // A row of units alone, such as units produced, has no value per unit.
-  const each = side.units === undefined || side.amount === undefined ? '' : side.units ? money(side.amount / side.units) : '—';
+  const each = side.units === undefined || side.amount === undefined ? '' : side.units ? price(side.amount / side.units) : '—';
   // An imported layer is carried at its transfer price plus the customs duty paid on it.
   const duty = side.duty > 0.005 && side.units
-    ? `<small class="entity-duty">${money((side.amount - side.duty) / side.units)} price + ${money(side.duty / side.units)} duty</small>` : '';
+    ? `<small class="entity-duty">${price((side.amount - side.duty) / side.units)} price + ${price(side.duty / side.units)} duty</small>` : '';
   return `<td>${units}</td><td>${each}${duty}</td><td>${side.amount === undefined ? '' : money(side.amount)}</td>`;
 }
 
@@ -281,11 +284,11 @@ function usTaxRows(sides, { heading, sub, line, amount, note }) {
   line('Less regular federal tax after credits', tax(t => -t.regularTax), { keep: true });
   line('BEAT', tax(t => t.beat.amount), { type: 'subtotal', keep: true, ...flat });
   const reasons = new Set(sides.filter(side => side.usTax.beat.deductions && !side.usTax.beat.applies).map(side => !side.usTax.beat.grossReceiptsMet
-    ? 'the group is set below the $500 million gross receipts test in Scenario settings'
+    ? `the US parent’s gross receipts, ${realSize.format(side.usTax.beat.grossReceipts)} a year, are below the ${realSize.format(rules.beatGrossReceipts)} test`
     : `the base erosion percentage is below ${rate.format(rules.beatThreshold)}`));
   note(reasons.size
     ? `BEAT does not apply where ${[...reasons].join(', and where ')}.`
-    : 'BEAT applies: the case’s figures are scaled down from a group above the $500 million gross receipts test, which you can change in Scenario settings, and the base erosion percentage is above 3%. Goods bought from Switzerland enter cost of goods sold and are not base erosion payments.');
+    : `BEAT applies: the US parent’s gross receipts, ${realSize.format(budget.usTax.beat.grossReceipts)} a year in the budget, are above the ${realSize.format(rules.beatGrossReceipts)} test, and the base erosion percentage is above ${rate.format(rules.beatThreshold)}. The test averages three prior years; the model takes this year’s receipts. Goods bought from Switzerland enter cost of goods sold and are not base erosion payments.`);
 }
 
 function rowHtml(row) {
@@ -338,16 +341,16 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
     ${basis === 'quarter' ? calendar : ''}
     <section class="panel entity-report" aria-labelledby="detail-heading">
       <div class="panel-header"><div><h2 id="detail-heading">${html(nameOf(id))} · ${html(ENTITIES[id].role)}</h2>
-        <p class="subtitle">${basis === 'year' ? 'Full year 2027' : `${quarter} 2027 (${quarterSpans[period]})`} · USD · US GAAP · ${explain}</p></div></div>
+        <p class="subtitle">${basis === 'year' ? 'Full year 2027' : `${quarter} 2027 (${quarterSpans[period]})`} · ${IN_THOUSANDS}, units in thousands · US GAAP · ${explain}</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="detail-heading"><table class="entity-table">
         <colgroup span="1"></colgroup><colgroup span="3"></colgroup><colgroup span="3"></colgroup>
         <thead>
           <tr><th scope="col" rowspan="2">Line</th><th scope="colgroup" colspan="3">${html(budgetLabel)}</th><th scope="colgroup" colspan="3" class="entity-actual">${html(actualLabel)}</th></tr>
-          <tr><th scope="col">Units</th><th scope="col">Per unit</th><th scope="col">Amount</th><th scope="col" class="entity-actual">Units</th><th scope="col">Per unit</th><th scope="col">Amount</th></tr>
+          <tr><th scope="col">Units, thousands</th><th scope="col">Per unit, USD</th><th scope="col">Amount, ${IN_THOUSANDS}</th><th scope="col" class="entity-actual">Units, thousands</th><th scope="col">Per unit, USD</th><th scope="col">Amount, ${IN_THOUSANDS}</th></tr>
         </thead>
         <tbody>${buildRows(detail, layers).map(rowHtml).join('')}</tbody>
       </table></div>
-      <p class="field-note panel-note">Each goods line is units times the value per unit. Net sales use the net sales price. Cost of sales and inventory use the value the units are carried at in stock, first in, first out: the oldest layer is sold first. ${layers
+      <p class="field-note panel-note">Units are in thousands and amounts in ${IN_THOUSANDS}, so the value per unit is in dollars. Each goods line is units times the value per unit. Net sales use the net sales price. Cost of sales and inventory use the value the units are carried at in stock, first in, first out: the oldest layer is sold first. ${layers
         ? 'A layer is the units that came in at one value. For a distributor that is a quarter’s purchases at that quarter’s transfer price plus any customs duty. The plants’ cost moves every month, so their layers are by month. A product line’s value per unit is the average of its layers.'
         : 'Turn on stock layers to see the purchases and prices behind each average.'} To trace a transfer price change, find the new price under Finished goods received in the quarter it takes effect, then follow that layer into cost of sales as the older layers are sold. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard.</p>
     </section>`;

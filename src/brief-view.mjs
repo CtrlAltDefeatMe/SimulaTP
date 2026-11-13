@@ -52,7 +52,7 @@ export function renderBrief({ config, revealed }) {
           <p>You lead transfer pricing for a US-headquartered industrial group. It makes three product families in the United States and Poland and sells them to third-party customers in North America, Europe and Asia.</p>
           <p>The lines are not equally profitable. Control Systems earns a high margin, Precision Components a middling one and Industrial Modules a thin one. The order is the same in every market, though price levels differ.</p>
           <p>Each line has its plant. Control Systems is made only in the United States and Industrial Modules only in Poland, so the United States sells Control Systems to Switzerland and Switzerland sells Industrial Modules to the United States. Both plants make Precision Components for their own region.</p>
-          <p>The 2027 budget is set and the year is about to start. All figures are synthetic and in US dollars.</p>
+          <p>The 2027 budget is set and the year is about to start. All figures are synthetic. Amounts are in thousands of US dollars and units in thousands; prices per unit are in dollars.</p>
         </div>
       </section>
       <section class="panel" aria-labelledby="brief-job-heading">
