@@ -137,7 +137,7 @@ function costMarkup(price) {
 function pricingTable(routes, editing, priceFloor) {
   const rule = `${priceFloor
     ? `Price floor: standard cost plus ${compactPercent.format(priceFloor.markup)}. No price can go below it.`
-    : 'No price floor is set. A price can go below standard cost.'} Import duty is paid by the buyer on top of the price and becomes part of its cost of sales.`;
+    : 'No price floor is set. A price can go below standard cost.'} Import duty is paid by the buyer on top of the price and becomes part of its cost of sales. The United States and Switzerland sell each other only the lines their own plants make.`;
   return `<section class="panel" aria-labelledby="goods-pricing-table-heading">
     <div class="panel-header"><div><h2 id="goods-pricing-table-heading">Goods prices by channel</h2><p class="subtitle">USD per unit · ${rule}</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="goods-pricing-table-heading">
@@ -153,7 +153,7 @@ function pricingTable(routes, editing, priceFloor) {
               ${html(entityName(route.from))} <span aria-hidden="true">→</span><span class="visually-hidden"> to </span> ${html(entityName(route.to))}
             </th><td class="pricing-policy" rowspan="${route.prices.length}">${html(shortPolicy(route))}</td>` : ''}
             <th scope="row" class="pricing-family">${html(productName(price.product))}</th>
-            <td>${format(price.standardCost)}${Number.isFinite(price.floor) ? `<small class="pricing-margin-target">Floor ${format(price.floor)}</small>` : ''}</td>
+            <td>${format(price.standardCost)}${price.made === false ? `<small class="pricing-margin-target">Bought from ${html(entityName(route.from === 'US' ? 'CH' : 'US'))}, with duty</small>` : ''}${Number.isFinite(price.floor) ? `<small class="pricing-margin-target">Floor ${format(price.floor)}</small>` : ''}</td>
             <td>${format(price.applied)}${price.duty ? `<small class="pricing-margin-target">+ ${markupPercent.format(price.duty)} import duty</small>` : ''}</td>
             <td>${costMarkup(price)}</td>
             <td>${editing ? policyPriceButton(route, price) : format(price.recommended)}</td>

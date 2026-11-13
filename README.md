@@ -6,6 +6,8 @@ The simulator uses a synthetic scenario. Tax and duty rates are illustrative. Sc
 
 ## What the model covers
 
+- One plant for each end of the range: Control Systems (high margin) is made only in the United States and Industrial Modules (low margin) only in Poland, so the United States and Switzerland sell those lines to each other. Both plants make Precision Components
+- Plant capacity by product line. When a plant is at its limit for Precision Components, the other plant makes the shortfall as far as its own limit allows. Demand for a line goes unmet, and the sale is lost, once its plants are at their limit and neither hub has stock left
 - Results reported by quarter. The model closes every month underneath, so stock, costs and shocks still move month by month
 - Demand, sales price and material cost shocks, group-wide and by market
 - FIFO inventory, toll manufacturing, a principal structure, services and a royalty

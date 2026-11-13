@@ -17,17 +17,19 @@ export const ENTITIES = {
 // The three lines differ in profitability, in the same order in every market: Control
 // Systems earns a high gross margin, Precision Components a middling one and Industrial
 // Modules a thin one. Price levels still differ by market through CHANNEL_FACTOR.
+// The high-margin line is made only in the United States and the low-margin line only in
+// Poland. Both plants make the middle line. See PRODUCT_PLANTS.
 export const PRODUCTS = {
   A: {
-    name: 'Precision Components', price: 112, material: 40, usConversion: 23, plConversion: 18,
+    name: 'Precision Components', price: 112, material: 38, usConversion: 23, plConversion: 18,
     demand: { US: 640, CH: 170, DE: 360, FR: 285, UK: 310, APAC: 430, CA: 245 },
   },
   B: {
-    name: 'Control Systems', price: 186, material: 44, usConversion: 25, plConversion: 20,
+    name: 'Control Systems', price: 186, material: 42, usConversion: 25, plConversion: 20,
     demand: { US: 430, CH: 110, DE: 240, FR: 200, UK: 185, APAC: 285, CA: 140 },
   },
   C: {
-    name: 'Industrial Modules', price: 268, material: 154, usConversion: 52, plConversion: 45,
+    name: 'Industrial Modules', price: 268, material: 152, usConversion: 52, plConversion: 45,
     demand: { US: 280, CH: 80, DE: 145, FR: 130, UK: 120, APAC: 180, CA: 90 },
   },
 }
@@ -54,6 +56,19 @@ export const POLICY_LABELS = {
 const DISTRIBUTORS = ['DE', 'FR', 'UK', 'APAC', 'CA']
 const MARKETS = ['US', 'CH', ...DISTRIBUTORS]
 const FAMILIES = Object.keys(PRODUCTS)
+/** The plants that make each product line. A line made in one plant reaches the other region by cross-supply. */
+export const PRODUCT_PLANTS = { A: ['US', 'PL'], B: ['US'], C: ['PL'] }
+const PLANTS = ['US', 'PL']
+// Two hubs hold the group's finished stock and supply its markets: the United States, fed
+// by the US plant, and Switzerland, fed by the Polish toll manufacturer.
+const HUBS = ['US', 'CH']
+const HUB_PLANT = { US: 'US', CH: 'PL' }
+const otherHub = hub => hub === 'US' ? 'CH' : 'US'
+const makes = (plant, family) => PRODUCT_PLANTS[family].includes(plant)
+// The plant a hub's supply of a product line normally comes from: its own if it makes the line, else the other one.
+const plantFor = (family, hub) => makes(HUB_PLANT[hub], family) ? HUB_PLANT[hub] : HUB_PLANT[otherHub(hub)]
+// Whether a hub makes a line itself or buys it from the other hub.
+const hubMakes = (hub, family) => makes(HUB_PLANT[hub], family)
 const LRD = new Set(['DE', 'FR', 'UK'])
 const ALL_COMPANIES = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)
 // Poland and India charge a fixed monthly fee and are tested on their markup on cost.
@@ -76,16 +91,15 @@ const ZERO_SHOCK = { demand: 0, salesPrice: 0, materialCost: 0 }
 const DEFAULT_RD_RATE = 0.04
 // The default budget before R&D, less R&D at its default share of sales. Keeping the
 // target equal to the uncalibrated budget leaves the base unit costs unscaled.
-const DEFAULT_ANNUAL_MARGIN = 2_282_638.939772495 / 10_487_570 - DEFAULT_RD_RATE
-// Defaults of earlier versions: before plant capacity was cut to about a normal month's
-// output, before customs duty entered cost of sales, and before unit costs and operating
-// expenses were raised.
-const PREVIOUS_DEFAULT_MARGINS = [2_287_230.2960874448, 2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
+const DEFAULT_ANNUAL_MARGIN = 2_281_724.4253404764 / 10_487_570 - DEFAULT_RD_RATE
+// Defaults of earlier versions: before each product line was given its own plant, before
+// plant capacity was cut to about a normal month's output, before customs duty entered
+// cost of sales, and before unit costs and operating expenses were raised.
+const PREVIOUS_DEFAULT_MARGINS = [2_282_638.939772495, 2_287_230.2960874448, 2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
   .map(profit => profit / 10_487_570 - DEFAULT_RD_RATE)
-// Units a month across all three product lines: about a normal month's output at each
-// plant, so both run at their limit in the busier months and draw on stock.
-const DEFAULT_CAPACITY = { US: 2150, PL: 2900 }
-const PREVIOUS_DEFAULT_CAPACITY = { US: 2550, PL: 4850 }
+// Units a month for each product line a plant makes. Each is a little above a normal
+// month's output, so a plant runs at its limit in the busier months and draws on stock.
+const DEFAULT_CAPACITY = { US: { A: 915, B: 1645 }, PL: { A: 1565, C: 1035 } }
 const RD_MARKUP = 0.10
 // Arm's-length ranges for the tested distributors. Each range must contain its target.
 const DEFAULT_RANGES = {
@@ -123,6 +137,10 @@ export const YEAR_END_MODES = ['none', 'range', 'target']
 export const MAX_ROYALTY_RATE = 0.5
 const HISTORICAL_OPENING_POLICIES = { lrdMargin: 0.03, ffdMargin: 0.075, polandMarkup: 0.08 }
 const sourceOf = id => id === 'CA' ? 'US' : 'CH'
+// The hub an entity's goods come through. A hub is its own.
+const hubOf = id => id === 'US' || id === 'CA' ? 'US' : 'CH'
+// The markets a hub supplies, itself included.
+const hubMarkets = hub => MARKETS.filter(id => hubOf(id) === hub)
 const goodsRouteKey = (from, to) => from + '-' + to
 const GOODS_ROUTES = [
   { from: 'US', to: 'CH', policy: 'US_TO_CH', markup: 'usToSwissMarkup' },
@@ -130,6 +148,8 @@ const GOODS_ROUTES = [
   ...DISTRIBUTORS.map(to => ({ from: sourceOf(to), to, policy: LRD.has(to) ? 'LRD_GOODS' : 'FFD_GOODS' })),
 ].map(route => ({ ...route, key: goodsRouteKey(route.from, route.to) }))
 const GOODS_ROUTE_KEYS = new Set(GOODS_ROUTES.map(route => route.key))
+// A hub can only cross-supply a line its own plant makes. Every line reaches the distributors.
+const routeCarries = ({ from, markup }, family) => !markup || hubMakes(from, family)
 export const TAXED_ENTITIES = ALL_COMPANIES
 const sum = values => values.reduce((total, value) => total + value, 0)
 const valueOf = (lots, field) => sum(lots.map(lot => lot.quantity * lot[field]))
@@ -156,7 +176,7 @@ const dutyRates = pick => Object.fromEntries(CUSTOMS_LANES.map(({ key }) => [
 
 export function createConfig() {
   return {
-    capacity: { ...DEFAULT_CAPACITY },
+    capacity: structuredClone(DEFAULT_CAPACITY),
     policies: {
       lrdMargin: 0.03, ffdMargin: 0.075, polandMarkup: 0.08, belgiumMargin: 0.06,
       usServicesMarkup: 0.07, indiaServicesMarkup: 0.12, royaltyRate: 0.05,
@@ -206,9 +226,10 @@ export function upgradeConfig(config, started) {
     upgraded.customs = !started && untouched ? defaults.customs
       : { rates: dutyRates(key => savedDuty[LEGACY_DUTY_ROUTES[key]] ?? DEFAULT_DUTY_RATES[key]) }
   }
-  // A scenario that has not started and still holds the earlier plant capacities takes the current ones.
-  if (!started && upgraded.capacity?.US === PREVIOUS_DEFAULT_CAPACITY.US && upgraded.capacity?.PL === PREVIOUS_DEFAULT_CAPACITY.PL) {
-    upgraded.capacity = { ...DEFAULT_CAPACITY }
+  // Capacity used to be one figure for each plant across all product lines. It is now set
+  // for each line a plant makes, so a scenario saved the old way takes the current limits.
+  if (typeof upgraded.capacity?.US !== 'object' || typeof upgraded.capacity?.PL !== 'object') {
+    upgraded.capacity = structuredClone(DEFAULT_CAPACITY)
   }
   // A scenario that has not started and still holds an earlier default takes the current one.
   if (!started && upgraded.rd.salesRate === DEFAULT_RD_RATE
@@ -283,9 +304,13 @@ function validateConfig(config) {
       throw new RangeError('The US share of R&D must be between 0% and 100%.')
     }
   }
-  for (const entity of ['US', 'PL']) {
-    const capacity = config.capacity?.[entity]
-    if (!Number.isSafeInteger(capacity) || capacity < 0) throw new RangeError(`${entity} capacity must be a nonnegative whole number.`)
+  for (const plant of PLANTS) {
+    for (const family of FAMILIES.filter(family => makes(plant, family))) {
+      const capacity = config.capacity?.[plant]?.[family]
+      if (!Number.isSafeInteger(capacity) || capacity < 0) {
+        throw new RangeError(`${ENTITIES[plant].name} capacity for ${PRODUCTS[family].name} must be a nonnegative whole number.`)
+      }
+    }
   }
   for (const key of Object.keys(createConfig().policies)) {
     const value = config.policies?.[key]
@@ -435,24 +460,53 @@ function distributorLandedCost(product, market, policies) {
   return Math.max(0, basePrice(product, market) * (1 - rate - distributorCostRate(market)))
 }
 
+// The customs origin of a product line as a hub normally holds it: where its plant is.
+const plannedOrigin = (family, hub) => plantFor(family, hub) === 'US' ? 'US' : 'EU'
+
 // The policy transfer price is the landed cost less the import duty the distributor pays
-// on top of the price. The plan assumes goods from the supplier's own plant.
+// on top of the price. The plan assumes goods from the plant that normally supplies the line.
 function distributorUnitTp(family, market, config, policies = config.policies) {
   const supplier = sourceOf(market)
-  const duty = importDutyRate(config, supplier, market, family, customsBlock(supplier))
+  const duty = importDutyRate(config, supplier, market, family, plannedOrigin(family, supplier))
   return distributorLandedCost(PRODUCTS[family], market, policies) / (1 + duty)
 }
 
-// The supplier's standard cost of a unit: budget materials and conversion, plus the
-// toll fee for goods the Swiss principal has made in Poland. Shocks do not move it.
-function standardUnitCost(from, product, policies) {
-  return from === 'US' ? baseGroupCost(product, 'US')
+const CROSS_MARKUP = { US: 'usToSwissMarkup', CH: 'swissToUsMarkup' }
+
+// What a hub's own plant charges it for a unit: budget materials and conversion, plus the
+// toll fee for goods the Swiss principal has made in Poland.
+function madeUnitCost(hub, product, policies) {
+  return hub === 'US' ? baseGroupCost(product, 'US')
     : baseGroupCost(product, 'PL') + product.plConversion * policies.polandMarkup
 }
 
-function standardCosts(policies, costScale) {
+// The price one hub charges the other for a line it makes: its standard cost plus the cross-supply markup.
+function crossSupplyPrice(from, family, policies) {
+  return madeUnitCost(from, PRODUCTS[family], policies) * (1 + policies[CROSS_MARKUP[from]])
+}
+
+// The supplier's standard cost of a unit. For a line its plant makes, that is the made
+// cost. For a line it buys from the other hub, it is the cross-supply price plus the
+// import duty paid on it. Shocks do not move it.
+function standardUnitCost(from, family, config, policies = config.policies) {
+  if (hubMakes(from, family)) return madeUnitCost(from, PRODUCTS[family], policies)
+  const seller = otherHub(from)
+  return crossSupplyPrice(seller, family, policies) * (1 + importDutyRate(config, seller, from, family, plannedOrigin(family, seller)))
+}
+
+// What a unit has cost the group by the time a hub holds it: the plant's materials and
+// conversion, and the duty paid if it crossed from the other hub.
+function hubGroupCost(hub, family, config, policies = config.policies) {
+  const product = PRODUCTS[family]
+  if (hubMakes(hub, family)) return baseGroupCost(product, HUB_PLANT[hub])
+  const seller = otherHub(hub)
+  return baseGroupCost(product, HUB_PLANT[seller])
+    + crossSupplyPrice(seller, family, policies) * importDutyRate(config, seller, hub, family, plannedOrigin(family, seller))
+}
+
+function standardCosts(config, costScale) {
   return Object.fromEntries(GOODS_ROUTES.map(({ key, from }) => [
-    key, Object.fromEntries(FAMILIES.map(family => [family, standardUnitCost(from, PRODUCTS[family], policies) * costScale])),
+    key, Object.fromEntries(FAMILIES.map(family => [family, standardUnitCost(from, family, config) * costScale])),
   ]))
 }
 
@@ -477,8 +531,7 @@ function standardGoodsPrices(config, costScale) {
   const { policies } = config
   return Object.fromEntries(GOODS_ROUTES.map(({ key, from, to, markup }) => [
     key, Object.fromEntries(FAMILIES.map(family => {
-      const product = PRODUCTS[family]
-      const price = markup ? standardUnitCost(from, product, policies) * costScale * (1 + policies[markup])
+      const price = markup ? standardUnitCost(from, family, config) * costScale * (1 + policies[markup])
         : distributorUnitTp(family, to, config)
       return [family, roundCurrency(price)]
     })),
@@ -490,14 +543,16 @@ function seedOpeningStock(costScale, config) {
   // invoice price plus any import duty paid on it. Group cost follows the scenario's
   // consolidated budget calibration and carries the same duty.
   const historical = HISTORICAL_OPENING_POLICIES
+  // Last year's toll markup, with this year's cross-supply markups.
+  const history = { ...config.policies, ...historical }
   const stock = new Stock()
   for (const family of FAMILIES) {
     const product = PRODUCTS[family]
     for (const market of DISTRIBUTORS) {
-      const cost = baseGroupCost(product, sourceOf(market)) * costScale
+      const cost = hubGroupCost(sourceOf(market), family, config, history) * costScale
       const tp = distributorLandedCost(product, market, historical)
       const bin = stock.bin(market, market, family)
-      const origin = customsBlock(sourceOf(market))
+      const origin = plannedOrigin(family, sourceOf(market))
       const rate = importDutyRate(config, sourceOf(market), market, family, origin)
       // The duty inside a landed cost.
       const duty = landed => landed * rate / (1 + rate)
@@ -507,22 +562,46 @@ function seedOpeningStock(costScale, config) {
         makeLot(product.demand[market], tp, cost + duty(tp), product.material * costScale, '2026-12', origin, 'bought', { unitDuty: duty(tp), declared }),
       ]
     }
-    const swissDemand = sum(MARKETS.filter(id => id !== 'US' && id !== 'CA').map(id => product.demand[id]))
-    const cost = baseGroupCost(product, 'PL') * costScale
-    const local = cost + product.plConversion * costScale * historical.polandMarkup
-    const warehouse = stock.bin('CH', 'BE', family)
-    warehouse.lots = [0.96, 0.98, 0.99, 1].map((factor, index) =>
-      makeLot(swissDemand, local * factor, cost * factor, product.material * costScale * factor, '2026-' + String(9 + index).padStart(2, '0'), 'EU', 'converted'))
-    const us = stock.bin('US', 'US', family)
-    const usCost = baseGroupCost(product, 'US') * costScale
-    us.lots = [makeLot(product.demand.US + product.demand.CA, usCost, usCost, product.material * costScale, '2026-12', 'US', 'made')]
+    // Each hub opens with its usual stock. Of a line its own plant makes, that is four
+    // months of its markets' demand in the Swiss warehouse and one month in the United
+    // States, carried at what the plant charged. Of a line it buys from the other hub, it
+    // is one month, carried at the cross-supply price plus the duty paid on it.
+    const opening = (hub, factor, month) => {
+      const material = product.material * costScale * factor
+      const vintage = '2026-' + String(month).padStart(2, '0')
+      const units = sum(hubMarkets(hub).map(id => product.demand[id]))
+      const origin = plannedOrigin(family, hub)
+      if (hubMakes(hub, family)) {
+        const group = baseGroupCost(product, HUB_PLANT[hub]) * costScale * factor
+        const local = madeUnitCost(hub, product, history) * costScale * factor
+        return makeLot(units, local, group, material, vintage, origin, hub === 'US' ? 'made' : 'converted')
+      }
+      const seller = otherHub(hub)
+      const price = crossSupplyPrice(seller, family, history) * costScale * factor
+      const duty = price * importDutyRate(config, seller, hub, family, origin)
+      const group = baseGroupCost(product, HUB_PLANT[seller]) * costScale * factor + duty
+      return makeLot(units, price + duty, group, material, vintage, origin, 'bought', { unitDuty: duty, declared: origin })
+    }
+    for (const hub of HUBS) {
+      // One lot for each month of stock, the older ones bought or made a little cheaper.
+      const months = bufferMonths(hub, family)
+      stock.bin(hub, hub === 'CH' ? 'BE' : 'US', family).lots = [0.96, 0.98, 0.99, 1].slice(-months).map((factor, index) =>
+        opening(hub, factor, 12 - months + 1 + index))
+    }
+    // Poland holds materials and work in process only for the lines it converts.
+    if (!makes('PL', family)) continue
     for (const [stage, months] of [['raw', 0.35], ['wip', 0.15]]) {
       const bin = stock.bin('CH', 'PL', family, stage)
       const material = product.material * costScale
-      bin.lots = [makeLot(Math.round(swissDemand * months), material, material, material, '2026-12', 'EU', 'materials')]
+      bin.lots = [makeLot(Math.round(normalUnits('PL', family) * months), material, material, material, '2026-12', 'EU', 'materials')]
     }
   }
   return stock
+}
+
+// The units a plant makes of a product line in a normal month: the base demand of the markets it supplies.
+function normalUnits(plant, family) {
+  return sum(HUBS.filter(hub => plantFor(family, hub) === plant).flatMap(hub => hubMarkets(hub)).map(id => PRODUCTS[family].demand[id]))
 }
 
 class Ledger {
@@ -605,7 +684,18 @@ function allocate(requests, available) {
   return allocated
 }
 
-function monthPlan(stock, month, shocks) {
+// Months of its markets' base demand that each hub aims to hold in finished stock of a
+// line its own plant makes. A line bought from the other hub is held for one month.
+const HUB_BUFFER_MONTHS = { US: 1, CH: 4 }
+const bufferMonths = (hub, family) => hubMakes(hub, family) ? HUB_BUFFER_MONTHS[hub] : 1
+const hubBuffer = (hub, family) => bufferMonths(hub, family) * sum(hubMarkets(hub).map(id => PRODUCTS[family].demand[id]))
+
+// What each plant makes in the month and what the hubs ship to each other, by product line.
+// A plant cannot make more of a line than its capacity for that line. A line made in one
+// plant is ordered from that plant's hub by the other hub. For a line both plants make,
+// each plant supplies its own hub, and where one is at its limit the other makes the
+// shortfall as far as its own capacity allows and its hub ships it across.
+function monthPlan(stock, month, shocks, config) {
   const seasonal = SEASONAL[month - 1]
   return Object.fromEntries(FAMILIES.map(family => {
     const product = PRODUCTS[family]
@@ -614,20 +704,39 @@ function monthPlan(stock, month, shocks) {
     ]))
     const us = stock.bin('US', 'US', family)
     const warehouse = stock.bin('CH', 'BE', family)
+    const bins = { US: us, CH: warehouse }
     const orders = Object.fromEntries(DISTRIBUTORS.map(id => [
       id, Math.max(0, demand[id] + 2 * product.demand[id] - unitsOf(stock.bin(id, id, family).lots)),
     ]))
-    const usDemand = demand.US + orders.CA
-    const swissDemand = demand.CH + orders.DE + orders.FR + orders.UK + orders.APAC
-    const usToSwiss = Math.round(swissDemand * 0.15)
-    const swissToUs = Math.round(usDemand * 0.12)
-    const usBuffer = product.demand.US + product.demand.CA
-    const warehouseBuffer = 4 * sum(MARKETS.filter(id => id !== 'US' && id !== 'CA').map(id => product.demand[id]))
-    return [family, {
-      demand, us, warehouse, orders, usToSwiss, swissToUs,
-      usBuild: Math.max(0, usDemand + usToSwiss + usBuffer - swissToUs - unitsOf(us.lots)),
-      plBuild: Math.max(0, swissDemand + swissToUs + warehouseBuffer - usToSwiss - unitsOf(warehouse.lots)),
-    }]
+    // What each hub's markets want from it this month, and what it needs to receive to
+    // serve them and end the month on its usual stock.
+    const wanted = Object.fromEntries(HUBS.map(hub => [
+      hub, demand[hub] + sum(DISTRIBUTORS.filter(id => sourceOf(id) === hub).map(id => orders[id])),
+    ]))
+    const need = Object.fromEntries(HUBS.map(hub => [hub, Math.max(0, wanted[hub] + hubBuffer(hub, family) - unitsOf(bins[hub].lots))]))
+    const limit = plant => makes(plant, family) ? config.capacity[plant][family] : 0
+    const build = { US: 0, PL: 0 }
+    // Units one hub asks the other for, keyed by the hub that ships them.
+    const cross = { US: 0, CH: 0 }
+    if (PRODUCT_PLANTS[family].length === 1) {
+      const maker = HUBS.find(hub => hubMakes(hub, family))
+      cross[maker] = need[otherHub(maker)]
+      build[HUB_PLANT[maker]] = Math.min(need.US + need.CH, limit(HUB_PLANT[maker]))
+    } else {
+      const own = Object.fromEntries(HUBS.map(hub => [hub, Math.min(need[hub], limit(HUB_PLANT[hub]))]))
+      // What a hub's markets want this month beyond its stock and what its own plant can make.
+      const short = Object.fromEntries(HUBS.map(hub => [hub, Math.max(0, wanted[hub] - unitsOf(bins[hub].lots) - own[hub])]))
+      for (const hub of HUBS) build[HUB_PLANT[hub]] = own[hub]
+      for (const hub of HUBS) {
+        const helper = otherHub(hub)
+        // The other plant makes the shortfall as far as its spare capacity goes.
+        const extra = Math.max(0, Math.min(need[hub] - own[hub], limit(HUB_PLANT[helper]) - own[helper]))
+        build[HUB_PLANT[helper]] += extra
+        // Beyond that, the other hub covers from its stock what would otherwise be a lost sale, unless it is short itself.
+        cross[helper] = Math.max(extra, short[helper] ? 0 : short[hub])
+      }
+    }
+    return [family, { demand, us, warehouse, orders, wanted, usToSwiss: cross.US, swissToUs: cross.CH, usBuild: build.US, plBuild: build.PL }]
   }))
 }
 
@@ -640,13 +749,10 @@ function produceInUs(stock, book, family, plan, usUnits, shocks, vintage, costSc
   book.post('US', 'inventory', 'externalClearing', usUnits * cost)
 }
 
-// Poland's conversion cost at normal volume: the base monthly demand it serves, at
-// standard conversion cost. A fixed share of it is overhead that does not move with output.
+// Poland's conversion cost at normal volume: the base monthly demand for the lines it
+// makes, in the markets it supplies, at standard conversion cost. A fixed share of it is overhead that does not move with output.
 function polandOverhead(config, costScale) {
-  const normal = sum(FAMILIES.map(family => {
-    const product = PRODUCTS[family]
-    return sum(MARKETS.filter(id => id !== 'US' && id !== 'CA').map(id => product.demand[id])) * product.plConversion
-  }))
+  const normal = sum(FAMILIES.map(family => normalUnits('PL', family) * PRODUCTS[family].plConversion))
   return (config.services?.polandFixedShare ?? 0) * normal * costScale
 }
 
@@ -730,27 +836,37 @@ function deliver(stock, book, config, { lots, from, to, target, family, policy, 
   book.post(from, 'cogs', 'inventory', valueOf(lots, 'unitValue'))
 }
 
+// Each hub shares the stock it holds between its own customers, its distributors and
+// what the other hub cannot cover from its own stock, in proportion to what each wanted
+// when there is not enough. Only then does it rebuild the other hub's stock, and it
+// sends just enough to leave both hubs holding the same share of their usual stock. A
+// shortage therefore runs the stock down at both hubs before a sale is lost. The hub
+// that ships across goes first, so the other can pass the goods on in the same month.
 function moveGoods(stock, book, plans, vintage, priceTable, config) {
   for (const family of FAMILIES) {
     const plan = plans[family]
     const fixedPrice = (from, to) => priceTable[goodsRouteKey(from, to)][family]
-    const usLots = stock.issue(plan.us, plan.usToSwiss)
-    const swissLots = stock.issue(plan.warehouse, plan.swissToUs)
-    deliver(stock, book, config, {
-      lots: usLots, from: 'US', to: 'CH', target: plan.warehouse, family, policy: 'US_TO_CH',
-      priceLot: () => fixedPrice('US', 'CH'), vintage,
-    })
-    deliver(stock, book, config, {
-      lots: swissLots, from: 'CH', to: 'US', target: plan.us, family, policy: 'CH_TO_US',
-      priceLot: () => fixedPrice('CH', 'US'), vintage,
-    })
-    for (const [supplier, source] of [['US', plan.us], ['CH', plan.warehouse]]) {
+    const bins = { US: plan.us, CH: plan.warehouse }
+    const asked = { US: plan.usToSwiss, CH: plan.swissToUs }
+    plan.demandAllocation = {}
+    for (const supplier of [...HUBS].sort((left, right) => asked[right] - asked[left])) {
+      const source = bins[supplier]
+      const receiver = otherHub(supplier)
       const markets = DISTRIBUTORS.filter(id => sourceOf(id) === supplier)
       const requested = markets.map(id => plan.orders[id])
-      const direct = plan.demand[supplier]
-      const allocations = allocate([direct, ...requested], unitsOf(source.lots))
-      plan.demandAllocation ??= {}
+      const urgent = Math.min(asked[supplier], Math.max(0, plan.wanted[receiver] - unitsOf(bins[receiver].lots)))
+      const allocations = allocate([plan.demand[supplier], ...requested, urgent], unitsOf(source.lots))
       plan.demandAllocation[supplier] = allocations[0]
+      const left = unitsOf(source.lots) - sum(allocations)
+      // What the other hub will hold once it has served its markets, before any restocking.
+      const held = Math.max(0, unitsOf(bins[receiver].lots) + allocations.at(-1) - plan.wanted[receiver])
+      const [own, other] = [hubBuffer(supplier, family), hubBuffer(receiver, family)]
+      const fair = Math.round((left + held) * other / (own + other)) - held
+      const restock = Math.max(0, Math.min(asked[supplier] - urgent, left, fair))
+      deliver(stock, book, config, {
+        lots: stock.issue(source, allocations.at(-1) + restock), from: supplier, to: receiver, target: bins[receiver], family,
+        policy: supplier === 'US' ? 'US_TO_CH' : 'CH_TO_US', priceLot: () => fixedPrice(supplier, receiver), vintage,
+      })
       markets.forEach((market, index) => deliver(stock, book, config, {
         lots: stock.issue(source, allocations[index + 1]), from: supplier, to: market,
         target: stock.bin(market, market, family), family, policy: LRD.has(market) ? 'LRD_GOODS' : 'FFD_GOODS',
@@ -990,14 +1106,26 @@ function yearDutyRate(id, priorMonths, book) {
   return value ? sum(imports.map(entry => entry.duty)) / value : 0
 }
 
-/** Third-party sales and group cost of sales by product line for a closed month. */
+/**
+ * Third-party sales and group cost of sales by product line for a closed month. `unfilled`
+ * is the demand that could not be supplied, and `lostSales` is what it would have sold for.
+ */
 export function productLineResults(month) {
   return FAMILIES.map(family => {
     const sales = month.sales.filter(sale => sale.product === family)
     const revenue = sum(sales.map(sale => sale.revenue))
     const cogs = sum(sales.map(sale => sale.groupCogs))
-    return { product: family, units: sum(sales.map(sale => sale.quantity)), revenue, cogs, grossProfit: revenue - cogs, grossMargin: margin(revenue - cogs, revenue) }
+    return {
+      product: family, units: sum(sales.map(sale => sale.quantity)), revenue, cogs, grossProfit: revenue - cogs, grossMargin: margin(revenue - cogs, revenue),
+      unfilled: sum(sales.map(sale => sale.unfilled)), lostSales: sum(sales.map(sale => sale.unfilled * sale.price)),
+    }
   })
+}
+
+/** Demand that could not be supplied in a closed month, by seller and product line. */
+export function unfilledDemand(month) {
+  return month.sales.filter(sale => sale.unfilled > 0)
+    .map(({ seller, product, unfilled, price }) => ({ seller, product, units: unfilled, lostSales: unfilled * price }))
 }
 
 /** Total income tax and customs duty for a set of closed months. */
@@ -1084,11 +1212,12 @@ function closeMonth(stock, config, month, shocks, priceTable, costScale, fees = 
   stock.startMonth()
   const vintage = '2027-' + String(month).padStart(2, '0')
   const book = new Ledger(month)
-  const plans = monthPlan(stock, month, shocks)
-  const usUnits = allocate(FAMILIES.map(family => plans[family].usBuild), config.capacity.US)
-  const plUnits = allocate(FAMILIES.map(family => plans[family].plBuild), config.capacity.PL)
+  const plans = monthPlan(stock, month, shocks, config)
+  const usUnits = FAMILIES.map(family => plans[family].usBuild)
+  const plUnits = FAMILIES.map(family => plans[family].plBuild)
+  // `limits` holds the month's capacity for each line the plant makes. `limit` is their total.
   const capacity = Object.fromEntries([['US', usUnits], ['PL', plUnits]].map(([id, units]) => [id, {
-    limit: config.capacity[id], used: sum(units),
+    limit: sum(Object.values(config.capacity[id])), used: sum(units), limits: { ...config.capacity[id] },
     byProduct: Object.fromEntries(FAMILIES.map((family, index) => [family, units[index]])),
   }]))
   FAMILIES.forEach((family, index) => produceInUs(stock, book, family, plans[family], usUnits[index], shocks, vintage, costScale))
@@ -1122,7 +1251,7 @@ export function explainVariance(budget, actual) {
   for (const sale of actual.sales) {
     const reference = budgetSales.get(sale.seller + '/' + sale.product)
     const product = PRODUCTS[sale.product]
-    const primaryPlant = sale.seller === 'US' || sale.seller === 'CA' ? 'US' : 'PL'
+    const primaryPlant = plantFor(sale.product, hubOf(sale.seller))
     const budgetUnitCogs = reference.quantity ? reference.groupCogs / reference.quantity : baseGroupCost(product, primaryPlant) * costScale
     const budgetUnitMaterials = reference.quantity ? reference.materialCogs / reference.quantity : product.material * costScale
     const changeInUnits = sale.quantity - reference.quantity
@@ -1178,6 +1307,7 @@ function combineMonths(config, months, quarter) {
     sales: months.flatMap(month => month.sales),
     capacity: Object.fromEntries(Object.keys(first.capacity).map(id => [id, {
       limit: add(month => month.capacity[id].limit), used: add(month => month.capacity[id].used),
+      limits: Object.fromEntries(Object.keys(first.capacity[id].limits).map(family => [family, add(month => month.capacity[id].limits[family])])),
       byProduct: Object.fromEntries(FAMILIES.map(family => [family, add(month => month.capacity[id].byProduct[family])])),
     }])),
     royaltyBase: add(month => month.royaltyBase),
@@ -1256,7 +1386,7 @@ function scenarioBudget(config, months = 0) {
       PL: roundCurrency(budgetServiceCost.PL * (1 + policies.polandMarkup)),
       IN: roundCurrency(budgetServiceCost.IN * (1 + policies.indiaServicesMarkup)),
     }
-    const costs = standardCosts(policies, costScale)
+    const costs = standardCosts(config, costScale)
     const floors = priceFloors(config, costs)
     let initial = costScale === 1 ? { ...provisional } : standardGoodsPrices(config, costScale)
     const openingNotes = {}
@@ -1763,8 +1893,9 @@ export function goodsPriceAlerts(config, month) {
   validatePricingMonth(month)
   const { initial, costs, floors } = scenarioBudget(config)
   const prices = goodsPricesForMonth(config, month, initial)
-  const rows = GOODS_ROUTES.flatMap(({ key, from, to }) => FAMILIES.map(product => ({
-    key, from, to, product, price: prices[key][product], standardCost: costs[key][product], floor: floors?.[key][product] ?? null,
+  const rows = GOODS_ROUTES.flatMap(route => FAMILIES.filter(family => routeCarries(route, family)).map(product => ({
+    key: route.key, from: route.from, to: route.to, product,
+    price: prices[route.key][product], standardCost: costs[route.key][product], floor: floors?.[route.key][product] ?? null,
   })))
   return {
     belowCost: rows.filter(row => row.price < row.standardCost),
@@ -1820,13 +1951,16 @@ export function reviewGoodsPricing(config, revealed) {
       openingNote: openingNotes[key],
       // Products whose price in force sits at the floor, the policy price the floor replaced,
       // and whether the floor puts the buyer's full-year target out of reach.
-      floorHeld: floors ? FAMILIES.filter(family => current[key][family] <= floors[key][family]) : [],
+      floorHeld: floors ? FAMILIES.filter(family => routeCarries(route, family) && current[key][family] <= floors[key][family]) : [],
       policyWithoutFloor: withoutFloor, floorShort,
-      prices: FAMILIES.map(product => ({
+      // A hub cross-supplies only the lines its own plant makes.
+      prices: FAMILIES.filter(family => routeCarries(route, family)).map(product => ({
         product, applied: current[key][product], recommended: quote.recommended?.[product] ?? startingQuote?.[product] ?? null,
         standardCost: costs[key][product], floor: floors?.[key][product] ?? null,
-        // The import duty the buyer pays on top of the price, for goods from the supplier's own plant.
-        duty: importDutyRate(config, from, to, product, customsBlock(from)),
+        // Whether the supplier makes the line itself or buys it from the other hub first.
+        made: hubMakes(from, product),
+        // The import duty the buyer pays on top of the price, for goods from the plant that normally supplies the line.
+        duty: importDutyRate(config, from, to, product, plannedOrigin(product, from)),
       })),
     }
   })

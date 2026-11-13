@@ -1,7 +1,7 @@
 import {
   applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_BLOCKS, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, GOODS_ORIGINS, MAX_ROYALTY_RATE,
-  POLICY_LABELS, PRODUCTS, productLineResults, profitAllocation, QUARTER_MONTHS, quarterly, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear,
-  summarizeTaxAndCustoms, TAXED_ENTITIES, upgradeConfig,
+  POLICY_LABELS, PRODUCT_PLANTS, PRODUCTS, productLineResults, profitAllocation, QUARTER_MONTHS, quarterly, quarterPricingMonth, reviewGoodsPricing, royaltyCheck, runYear,
+  summarizeTaxAndCustoms, TAXED_ENTITIES, unfilledDemand, upgradeConfig,
 } from './engine.mjs';
 import { renderBrief } from './brief-view.mjs';
 import { landPolygons } from './land.mjs';
@@ -91,6 +91,13 @@ function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) ?? localStorage.getItem(legacyStorageKey));
     if (saved?.config && Number.isInteger(saved.revealed) && saved.revealed >= 0 && saved.revealed <= 12) {
+      // A game saved before each product line was given its own plant cannot be carried on:
+      // the year it was playing no longer exists. It restarts with its settings kept.
+      if (typeof saved.config.capacity?.US !== 'object') {
+        const started = saved.revealed > 0 || saved.config.goodsPriceSchedule?.length > 0;
+        const config = { ...upgradeConfig(saved.config, false), goodsPriceSchedule: [], serviceFeeSchedule: [], yearEnd: defaults.yearEnd, startingPriceMethod: defaults.startingPriceMethod };
+        return { config, year: runYear(config), revealed: 0, returning: true, restarted: started };
+      }
       // Progress is saved in months. A game saved part-way through a quarter reopens at the last quarter it finished.
       const revealed = Math.floor(saved.revealed / QUARTER_MONTHS);
       const unstarted = saved.revealed === 0 && !saved.config.goodsPriceSchedule?.length;
@@ -129,6 +136,9 @@ const state = {
   mapEntity: null,
   mapBasis: initial.revealed ? 'actual' : 'budget',
   settingsMessage: '',
+  // Shown once on the Dashboard when a saved game had to be restarted.
+  notice: initial.restarted
+    ? 'Your saved game was restarted. Each product line now has its own plant, so the year you were playing no longer exists. Your scenario settings were kept, and plant capacity is back at its defaults by product line.' : '',
   pricingMessage: '',
   yearEndMessage: '',
   // True while the remaining quarters are being revealed without a stop.
@@ -400,22 +410,29 @@ function statPanel() {
   </section>`;
 }
 
+// Where each line is made, as the Dashboard names it.
+const plantNames = { US: 'the United States', PL: 'Poland' };
+const madeIn = family => PRODUCT_PLANTS[family].map(plant => plantNames[plant]).join(' and ');
+
 function productLinePanel(budget, actual) {
   const lines = productLineResults(actual ?? budget);
   const total = lines.reduce((sum, line) => ({
     units: sum.units + line.units, revenue: sum.revenue + line.revenue, cogs: sum.cogs + line.cogs,
-  }), { units: 0, revenue: 0, cogs: 0 });
-  const row = (name, line, className = '') => `<tr class="${className}">
-    <td class="table-name">${html(name)}</td><td>${amount(line.units, formatNumber)}</td><td>${amount(line.revenue)}</td>
+    unfilled: sum.unfilled + line.unfilled, lostSales: sum.lostSales + line.lostSales,
+  }), { units: 0, revenue: 0, cogs: 0, unfilled: 0, lostSales: 0 });
+  const row = (name, line, className = '', made = '') => `<tr class="${className}">
+    <td class="table-name">${html(name)}${made ? `<small class="pricing-margin-target">Made in ${html(made)}</small>` : ''}</td><td>${amount(line.units, formatNumber)}</td><td>${amount(line.revenue)}</td>
     <td>${amount(line.cogs)}</td><td>${amount(line.revenue - line.cogs)}</td>
     <td>${amount(line.revenue ? (line.revenue - line.cogs) / line.revenue : 0, formatPercent)}</td>
+    <td class="${line.unfilled ? 'negative' : ''}">${amount(line.unfilled, formatNumber)}${line.unfilled ? `<small class="pricing-margin-target">${amount(line.lostSales)} of sales lost</small>` : ''}</td>
   </tr>`;
   return `<section class="panel" aria-labelledby="product-heading">
     <div class="panel-header"><div><h2 id="product-heading">Product lines</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · third-party sales at group cost · USD</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="product-heading"><table>
-      <thead><tr><th scope="col">Product family</th><th scope="col">Units sold</th><th scope="col">Net sales</th><th scope="col">Cost of goods sold</th><th scope="col">Gross profit</th><th scope="col">Gross margin</th></tr></thead>
-      <tbody>${lines.map((line) => row(productFor(line.product), line)).join('')}${row('All product lines', total, 'total-row')}</tbody>
+      <thead><tr><th scope="col">Product family</th><th scope="col">Units sold</th><th scope="col">Net sales</th><th scope="col">Cost of goods sold</th><th scope="col">Gross profit</th><th scope="col">Gross margin</th><th scope="col">Demand not met, units</th></tr></thead>
+      <tbody>${lines.map((line) => row(productFor(line.product), line, '', madeIn(line.product))).join('')}${row('All product lines', total, 'total-row')}</tbody>
     </table></div>
+    <p class="field-note panel-note">A line made in one plant reaches the other region through the United States and Switzerland selling to each other. Demand goes unmet when a plant is at its limit for a line and neither of them has stock of it left.</p>
   </section>`;
 }
 
@@ -471,11 +488,11 @@ function controlPanels(budget, actual) {
     profitDifference: 'Consolidated profit',
     inventoryDifference: 'Inventory roll-forward',
   };
-  // The limit is set by the month in Scenario settings. A quarter can make three months of it.
-  const capacityRows = Object.entries(capacity).map(([id, entry]) => [
-    labelFor(id),
-    `${amount(entry.used, formatNumber)} of ${amount(entry.limit, formatNumber)} units · ${amount(state.config.capacity[id], formatNumber)} a month`,
-  ]);
+  // The limits are set by the month in Scenario settings. A quarter can make three months of each.
+  const capacityRows = Object.entries(capacity).flatMap(([id, entry]) => Object.entries(entry.limits).map(([family, limit]) => [
+    `${labelFor(id)} · ${productFor(family)}`,
+    `${amount(entry.byProduct[family], formatNumber)} of ${amount(limit, formatNumber)} units · ${amount(state.config.capacity[id][family], formatNumber)} a month`,
+  ]));
   return `<div class="detail-stack">
     <section class="panel breakdown" aria-labelledby="capacity-heading">
       <div class="panel-header"><h2 id="capacity-heading">Production capacity</h2></div>${metricList(capacityRows)}
@@ -488,6 +505,22 @@ function controlPanels(budget, actual) {
       ]))}
     </section>
   </div>`;
+}
+
+// Demand the group could not supply in the quarter on screen, by product line.
+function unmetDemandBanner(quarter) {
+  const lost = new Map();
+  for (const { product, units, lostSales } of unfilledDemand(quarter)) {
+    const line = lost.get(product) ?? { units: 0, lostSales: 0 };
+    lost.set(product, { units: line.units + units, lostSales: line.lostSales + lostSales });
+  }
+  if (!lost.size) return '';
+  const parts = [...lost].map(([product, line]) => {
+    const plants = PRODUCT_PLANTS[product];
+    const why = plants.length === 1 ? `made only in ${plantNames[plants[0]]}` : 'both plants at their limit';
+    return `${amount(line.units, formatNumber)} units of ${html(productFor(product))} (${why}), ${amount(line.lostSales)} of sales`;
+  });
+  return `<p class="alert-banner" role="note"><strong>Demand not met.</strong> In ${quarters[state.period]} the group could not supply ${parts.join('; ')}. The plant was at its limit for the line and no stock of it was left. See Production capacity below, or raise the limit in <a href="#settings">Scenario settings</a> for a new year.</p>`;
 }
 
 // Flags goods prices in force this quarter that are below the supplier's cost or held at the floor.
@@ -519,7 +552,9 @@ function renderDashboard() {
   const actual = state.period < state.revealed ? byQuarter().actual[state.period] : null;
   const bridge = actual ? byQuarter().variance[state.period] : null;
   pageBody.innerHTML = `
+    ${state.notice ? `<p class="alert-banner alert-banner-info" role="status">${html(state.notice)}</p>` : ''}
     ${quarterStrip()}
+    ${unmetDemandBanner(actual ?? budget)}
     ${priceAlertBanner()}
     ${kpis(budget.consolidated, actual?.consolidated)}
     ${chart()}
@@ -907,9 +942,11 @@ function renderSettings() {
         </div>
         <div class="detail-stack">
           <section class="panel" aria-labelledby="production-heading">
-            <div class="panel-header"><div><h2 id="production-heading">Production capacity</h2><p class="subtitle">Maximum units per month, across all three product families. A quarter can make three times this</p></div></div>
-            <div class="form-fields field-pair">
-              ${Object.entries(capacity).map(([id, limit]) => `<label class="field">${html(labelFor(id))}${numberInput(`capacity.${id}`, limit, { min: 0, step: 1 })}</label>`).join('')}
+            <div class="panel-header"><div><h2 id="production-heading">Production capacity</h2><p class="subtitle">Maximum units per month for each product line a plant makes. A quarter can make three times this</p></div></div>
+            <div class="form-fields">
+              ${Object.entries(capacity).map(([id, limits]) => `<div class="field-pair">${Object.entries(limits).map(([family, limit]) =>
+                `<label class="field">${html(labelFor(id))} · ${html(productFor(family))}${numberInput(`capacity.${id}.${family}`, limit, { min: 0, step: 1 })}</label>`).join('')}</div>`).join('')}
+              <p class="field-note">Control Systems is made only in the United States and Industrial Modules only in Poland. Each reaches the other region through the United States and Switzerland selling to each other. Both plants make Precision Components, and when one is at its limit the other makes the shortfall as far as its own limit allows. Demand for a line goes unmet once its plants are at their limit and the stock is gone.</p>
             </div>
           </section>
           <section class="panel" aria-labelledby="pricing-heading">
@@ -1008,7 +1045,9 @@ function readSettings(form) {
   config.rd.salesRate = Number(data.get('rd.salesRate')) / 100;
   config.rd.usShare = Number(data.get('rd.usShare')) / 100;
   config.simulation.seed = String(data.get('seed')).trim();
-  for (const key of Object.keys(config.capacity)) config.capacity[key] = Number(data.get(`capacity.${key}`));
+  for (const [plant, limits] of Object.entries(config.capacity)) {
+    for (const family of Object.keys(limits)) limits[family] = Number(data.get(`capacity.${plant}.${family}`));
+  }
   for (const [key] of policyFields) config.policies[key] = Number(data.get(`policy.${key}`)) / 100;
   for (const [kind, bound] of rangeFields) config.ranges[kind][bound] = Number(data.get(`range.${kind}.${bound}`)) / 100;
   for (const key of MARKET_SHOCK_KEYS) config.simulation.marketVariation[key] = Number(data.get(`marketVariation.${key}`)) / 100;
@@ -1043,6 +1082,7 @@ function stopRun() {
 }
 
 function revealNext() {
+  state.notice = '';
   state.period = state.revealed;
   state.revealed += 1;
   state.mapBasis = 'actual';

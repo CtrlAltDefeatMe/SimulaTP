@@ -26,9 +26,9 @@ function groupRows({ policies, ranges }) {
   const range = kind => `${percent.format(ranges[kind].low)} to ${percent.format(ranges[kind].high)}`;
   return [
     ['United States', 'Manufacturer, IP owner and headquarters',
-      `Keeps the residual on North American sales. Receives the royalty from Switzerland and a fee for headquarters services at cost plus ${percent.format(policies.usServicesMarkup)}. Funds all R&D.`],
+      `Makes Control Systems for the whole group and Precision Components for North America. Sells Control Systems to Switzerland at cost plus ${percent.format(policies.usToSwissMarkup)} and buys Industrial Modules from it. Keeps the residual on North American sales. Receives the royalty from Switzerland and a fee for headquarters services at cost plus ${percent.format(policies.usServicesMarkup)}. Funds all R&D.`],
     ['Switzerland', 'European principal',
-      `Buys conversion from Poland, owns the stock in the Belgian warehouse, and sells to the European and Asian distributors and to independent distributors. Keeps the residual after routine returns and a ${percent.format(policies.royaltyRate)} royalty on European third-party sales.`],
+      `Buys conversion from Poland, which makes Industrial Modules for the whole group and Precision Components for Europe and Asia. Sells Industrial Modules to the United States at cost plus ${percent.format(policies.swissToUsMarkup)} and buys Control Systems from it. Owns the stock in the Belgian warehouse, and sells to the European and Asian distributors and to independent distributors. Keeps the residual after routine returns and a ${percent.format(policies.royaltyRate)} royalty on European third-party sales.`],
     ['Poland', 'Toll manufacturer',
       `A fixed quarterly fee: budgeted conversion cost plus ${percent.format(policies.polandMarkup)}. Markup range ${range('toll')}.`],
     ['Belgium', 'Warehouse operator', `A fee that leaves a ${percent.format(policies.belgiumMargin)} operating margin.`],
@@ -51,6 +51,7 @@ export function renderBrief({ config, revealed }) {
         <div class="brief-copy">
           <p>You lead transfer pricing for a US-headquartered industrial group. It makes three product families in the United States and Poland and sells them to third-party customers in North America, Europe and Asia.</p>
           <p>The lines are not equally profitable. Control Systems earns a high margin, Precision Components a middling one and Industrial Modules a thin one. The order is the same in every market, though price levels differ.</p>
+          <p>Each line has its plant. Control Systems is made only in the United States and Industrial Modules only in Poland, so the United States sells Control Systems to Switzerland and Switzerland sells Industrial Modules to the United States. Both plants make Precision Components for their own region.</p>
           <p>The 2027 budget is set and the year is about to start. All figures are synthetic and in US dollars.</p>
         </div>
       </section>
@@ -80,6 +81,7 @@ export function renderBrief({ config, revealed }) {
           <li>Reveal actuals one quarter at a time. The variance bridge explains each quarter’s gap to budget.</li>
           <li>After the Q1, Q2 and Q3 closes, open <a href="#pricing">Transfer prices</a>. The forecast shows where each tested entity will finish the year at current prices and fees. Take the policy price or fee, enter your own, or leave them alone.</li>
           <li>New prices apply to new shipments only. Each distributor holds about two months of stock, which keeps its old cost and is sold first. In the quarter a new price takes effect, about two-thirds of the units sold still carry the old price. From the next quarter all of them carry the new one.</li>
+          <li>Each plant has a monthly limit for each line it makes. When a plant is at its limit for Precision Components, the other plant makes the shortfall as far as its own limit allows. Control Systems and Industrial Modules have no second plant: once the stock is gone, the demand goes unmet and the sale is lost.</li>
           <li>Poland and India are paid a fixed quarterly fee, but their costs move. Part of Poland’s cost is fixed overhead. In a slow quarter its cost falls by less than its output and the fee does not fall at all, so its markup rises. A busy quarter does the reverse.</li>
           <li>${priceFloor?.enabled
             ? `A price floor is in force. No goods price can go below standard cost plus ${percent.format(priceFloor.markup)}, and a year-end credit cannot undo it. The floor takes priority over a distributor’s range, and the Transfer prices page says where it binds and what it does to the distributor’s margin.`

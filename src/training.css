@@ -57,6 +57,7 @@ label.field.field-flag, .field-flag input { color: var(--negative); }
 .alert-banner strong { color: var(--negative); }
 .alert-banner-floor { border-color: #ead9b5; border-left-color: #c58a1c; background: #fffcf5; }
 .alert-banner-floor strong { color: #8a5a00; }
+.alert-banner-info { border-color: #b9cfe6; border-left-color: var(--blue); background: #f3f8fd; color: var(--navy); }
 
 /* Customs duty by importing block, origin and product line */
 .customs-table { min-width: 860px; }

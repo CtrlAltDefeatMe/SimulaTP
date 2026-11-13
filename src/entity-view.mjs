@@ -204,7 +204,8 @@ function buildRows({ id, basis, budget, actual }, showLayers) {
 
   if (budget.made ?? actual.made) {
     heading(id === 'PL' ? 'Units converted for Switzerland' : 'Units produced in the US plant');
-    for (const family of families) line(PRODUCTS[family].name, side => ({ units: side.made[family].units }), { keep: true });
+    // A plant lists only the lines it makes.
+    for (const family of families) line(PRODUCTS[family].name, side => ({ units: side.made[family].units }));
   }
   return rows;
 }
