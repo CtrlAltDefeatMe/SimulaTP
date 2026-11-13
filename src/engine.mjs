@@ -76,11 +76,16 @@ const ZERO_SHOCK = { demand: 0, salesPrice: 0, materialCost: 0 }
 const DEFAULT_RD_RATE = 0.04
 // The default budget before R&D, less R&D at its default share of sales. Keeping the
 // target equal to the uncalibrated budget leaves the base unit costs unscaled.
-const DEFAULT_ANNUAL_MARGIN = 2_287_230.2960874448 / 10_487_570 - DEFAULT_RD_RATE
-// Defaults of earlier versions: before customs duty entered cost of sales, and before unit
-// costs and operating expenses were raised.
-const PREVIOUS_DEFAULT_MARGINS = [2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
+const DEFAULT_ANNUAL_MARGIN = 2_282_638.939772495 / 10_487_570 - DEFAULT_RD_RATE
+// Defaults of earlier versions: before plant capacity was cut to about a normal month's
+// output, before customs duty entered cost of sales, and before unit costs and operating
+// expenses were raised.
+const PREVIOUS_DEFAULT_MARGINS = [2_287_230.2960874448, 2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
   .map(profit => profit / 10_487_570 - DEFAULT_RD_RATE)
+// Units a month across all three product lines: about a normal month's output at each
+// plant, so both run at their limit in the busier months and draw on stock.
+const DEFAULT_CAPACITY = { US: 2150, PL: 2900 }
+const PREVIOUS_DEFAULT_CAPACITY = { US: 2550, PL: 4850 }
 const RD_MARKUP = 0.10
 // Arm's-length ranges for the tested distributors. Each range must contain its target.
 const DEFAULT_RANGES = {
@@ -151,7 +156,7 @@ const dutyRates = pick => Object.fromEntries(CUSTOMS_LANES.map(({ key }) => [
 
 export function createConfig() {
   return {
-    capacity: { US: 2550, PL: 4850 },
+    capacity: { ...DEFAULT_CAPACITY },
     policies: {
       lrdMargin: 0.03, ffdMargin: 0.075, polandMarkup: 0.08, belgiumMargin: 0.06,
       usServicesMarkup: 0.07, indiaServicesMarkup: 0.12, royaltyRate: 0.05,
@@ -200,6 +205,10 @@ export function upgradeConfig(config, started) {
     const untouched = Object.entries(LEGACY_DUTY_DEFAULTS).every(([route, rate]) => savedDuty[route] === rate)
     upgraded.customs = !started && untouched ? defaults.customs
       : { rates: dutyRates(key => savedDuty[LEGACY_DUTY_ROUTES[key]] ?? DEFAULT_DUTY_RATES[key]) }
+  }
+  // A scenario that has not started and still holds the earlier plant capacities takes the current ones.
+  if (!started && upgraded.capacity?.US === PREVIOUS_DEFAULT_CAPACITY.US && upgraded.capacity?.PL === PREVIOUS_DEFAULT_CAPACITY.PL) {
+    upgraded.capacity = { ...DEFAULT_CAPACITY }
   }
   // A scenario that has not started and still holds an earlier default takes the current one.
   if (!started && upgraded.rd.salesRate === DEFAULT_RD_RATE

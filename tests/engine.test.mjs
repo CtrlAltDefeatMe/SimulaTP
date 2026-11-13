@@ -172,8 +172,28 @@ test('duty rates saved by goods route become rates by block, origin and product 
   assert.equal(upgradeConfig({ ...createConfig(), customs: { rates: untouched } }, true).customs.rates['CA.EU'].A, 0)
 })
 
+test('the default plants run at their limit in busy months without leaving demand unfilled', () => {
+  const config = createConfig()
+  assert.deepEqual(config.capacity, { US: 2150, PL: 2900 })
+  const { budget, actual } = runYear(config)
+  for (const months of [budget, actual]) {
+    for (const id of ['US', 'PL']) {
+      assert.ok(months.every(month => month.capacity[id].used <= config.capacity[id]), id)
+      assert.ok(months.some(month => month.capacity[id].used === config.capacity[id]), id)
+      assert.ok(months.some(month => month.capacity[id].used < config.capacity[id]), id)
+    }
+    // Stock covers what the plants cannot make in a busy month.
+    assert.ok(months.every(month => month.sales.every(sale => sale.unfilled === 0)))
+  }
+  // A saved scenario that has not started takes the new limits. One in progress, or one with its own limits, keeps them.
+  const earlier = { US: 2550, PL: 4850 }
+  assert.deepEqual(upgradeConfig({ ...createConfig(), capacity: { ...earlier } }, false).capacity, config.capacity)
+  assert.deepEqual(upgradeConfig({ ...createConfig(), capacity: { ...earlier } }, true).capacity, earlier)
+  assert.deepEqual(upgradeConfig({ ...createConfig(), capacity: { US: 2400, PL: 4850 } }, false).capacity, { US: 2400, PL: 4850 })
+})
+
 test('a saved scenario that has not started takes the current default margin, and one in progress keeps its own', () => {
-  const previous = 3_965_513.159268929 / 10_487_570 - 0.04
+  const previous = 2_287_230.2960874448 / 10_487_570 - 0.04
   const saved = { ...createConfig(), annualOperatingMargin: previous }
   assert.equal(upgradeConfig(structuredClone(saved), false).annualOperatingMargin, createConfig().annualOperatingMargin)
   assert.equal(upgradeConfig(structuredClone(saved), true).annualOperatingMargin, previous)
