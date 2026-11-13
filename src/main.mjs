@@ -542,6 +542,30 @@ function priceAlertBanner() {
   return banners;
 }
 
+// Every entity's report for the period shown, as an Excel file. The export code loads only when it is used.
+async function exportEntities(button) {
+  button.disabled = true;
+  try {
+    const { entityWorkbook, XLSX_TYPE } = await import('./entity-export.mjs');
+    const { bytes, fileName } = entityWorkbook({
+      config: state.config, year: state.year, entities: legalEntities,
+      basis: state.detailBasis, period: state.period, revealed: closedMonths(),
+    });
+    const url = URL.createObjectURL(new Blob([bytes], { type: XLSX_TYPE }));
+    const link = Object.assign(document.createElement('a'), { href: url, download: fileName });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    announcement.textContent = `${fileName} downloaded.`;
+  } catch (error) {
+    console.error(error);
+    announcement.textContent = 'The Excel file could not be made. Please try again.';
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // The entity report: one company's sales, costs, fees and stock, budget beside actual.
 function renderEntities() {
   const detail = entityDetail(state.config, state.year, state.detailEntity, {
@@ -1239,6 +1263,10 @@ document.addEventListener('click', (event) => {
   const { action, period, metric, filter, mapEntity, detailBasis, detailLayers } = button.dataset;
   if (action === 'run-year') {
     runFullYear();
+    return;
+  }
+  if (action === 'export-entities') {
+    exportEntities(button);
     return;
   }
   if (action === 'year-summary') {

@@ -33,6 +33,7 @@ function html(value) {
 }
 
 const nameOf = id => ENTITIES[id]?.name ?? id;
+const EXCEL_ICON = '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 2v8m0 0L5 7m3 3 3-3M3 12v2h10v-2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const money = value => `${value <= -0.5 ? '−' : ''}${dollars.format(Math.abs(value))}`;
 const price = value => `${value <= -0.005 ? '−' : ''}${unitPrice.format(Math.abs(value))}`;
 
@@ -83,7 +84,7 @@ function rowHelpers(sides, rows) {
   return { heading, sub, note, line, amount };
 }
 
-function buildRows({ id, basis, budget, actual }, showLayers) {
+export function buildRows({ id, basis, budget, actual }, showLayers) {
   const rows = [];
   const sides = [budget, actual];
   const { heading, sub, line, amount } = rowHelpers(sides, rows);
@@ -227,7 +228,7 @@ function buildRows({ id, basis, budget, actual }, showLayers) {
 // The US parent's income tax, step by step: taxable income, FDDEI, NCTI and BEAT.
 // It has amounts only, so it gets its own table with one amount column a side: on a phone the
 // amounts then sit beside their labels instead of off to the right of the units and prices.
-function buildTaxRows({ budget, actual }) {
+export function buildTaxRows({ budget, actual }) {
   if (!budget.usTax) return [];
   const rows = [];
   const sides = [budget, actual];
@@ -327,19 +328,26 @@ function amountCell(side, kind) {
  * shown in the quarterly view. `layers` breaks cost of sales and stock out by when the
  * units came in. `detail.revealed` counts months, three to a quarter.
  */
-export function renderEntityDetail({ detail, entities, calendar = '', layers = true }) {
-  const { id, basis, period, revealed } = detail;
+// The column labels and period wording, shared by the page and the Excel export.
+export function reportLabels({ basis, period, revealed }) {
   const quarter = `Q${period + 1}`;
   const closed = Math.floor(revealed / 3);
-  const budgetLabel = basis === 'year' ? 'Budget · full year 2027' : `Budget · ${quarter}`;
-  const actualLabel = basis === 'year'
-    ? closed ? `Actual · year to date through Q${closed}` : 'Actual · no quarters revealed yet'
-    : period < closed ? `Actual · ${quarter}` : `Actual · ${quarter} not revealed yet`;
-  const when = basis === 'year' ? 'Full year 2027' : `${quarter} 2027 (${quarterSpans[period]})`;
+  return {
+    budgetLabel: basis === 'year' ? 'Budget · full year 2027' : `Budget · ${quarter}`,
+    actualLabel: basis === 'year'
+      ? closed ? `Actual · year to date through Q${closed}` : 'Actual · no quarters revealed yet'
+      : period < closed ? `Actual · ${quarter}` : `Actual · ${quarter} not revealed yet`,
+    when: basis === 'year' ? 'Full year 2027' : `${quarter} 2027 (${quarterSpans[period]})`,
+    explain: basis === 'year'
+      ? 'The budget column is the full year. The actual column adds up the quarters revealed so far.'
+      : 'An actual quarter shows zero until it is revealed.',
+  };
+}
+
+export function renderEntityDetail({ detail, entities, calendar = '', layers = true }) {
+  const { id, basis, period } = detail;
+  const { budgetLabel, actualLabel, when, explain } = reportLabels(detail);
   const taxRows = buildTaxRows(detail);
-  const explain = basis === 'year'
-    ? 'The budget column is the full year. The actual column adds up the quarters revealed so far.'
-    : 'An actual quarter shows zero until it is revealed.';
   return `
     <section class="panel entity-controls" aria-label="Choose what to show">
       <label class="field">Legal entity
@@ -358,6 +366,10 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
           <button type="button" data-detail-layers="show" aria-pressed="${layers}">Show</button>
           <button type="button" data-detail-layers="hide" aria-pressed="${!layers}">Hide</button>
         </div>
+      </div>
+      <div class="entity-export">
+        <button type="button" class="button" data-action="export-entities" aria-describedby="export-scope">${EXCEL_ICON}Export to Excel</button>
+        <span class="field-note" id="export-scope">All entities · ${basis === 'year' ? 'full year 2027' : `Q${period + 1} 2027`} · with stock layers</span>
       </div>
     </section>
     ${basis === 'quarter' ? calendar : ''}

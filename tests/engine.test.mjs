@@ -6,6 +6,8 @@ import {
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig, US_TAX_RULES, usIncomeTax,
 } from '../src/engine.mjs'
 import { renderEntityDetail } from '../src/entity-view.mjs'
+import { entityWorkbook } from '../src/entity-export.mjs'
+import { columnName, sheetName } from '../src/xlsx.mjs'
 import { DEFAULT_SIMULATION, simulateShocks, simulateStatAdjustments } from '../src/simulation.mjs'
 
 const cents = value => Math.round(value * 100) / 100
@@ -1273,4 +1275,51 @@ test('the entity detail report carries the US tax computation for the United Sta
   assert.ok(taxTable.includes('Total US income tax') && !taxTable.includes('Per unit, USD'))
   assert.equal((taxTable.match(/<tr class="entity-total"><th[^>]*>Total US income tax<\/th>(<td>[^<]*<\/td>)+<\/tr>/)?.[1] ?? '').length > 0, true)
   assert.equal(renderEntityDetail({ detail: entityDetail(config, year, 'DE', { basis: 'year', revealed: 12 }), entities: ['US', 'DE'] }).includes('entity-tax-table'), false)
+})
+
+// Reads the parts of a zip whose entries are stored uncompressed, as the Excel writer makes them.
+function storedZip(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const end = bytes.byteLength - 22
+  assert.equal(view.getUint32(end, true), 0x06054B50)
+  const parts = {}
+  let at = view.getUint32(end + 16, true)
+  for (let entry = 0; entry < view.getUint16(end + 10, true); entry += 1) {
+    assert.equal(view.getUint32(at, true), 0x02014B50)
+    assert.equal(view.getUint16(at + 10, true), 0, 'stored')
+    const size = view.getUint32(at + 20, true)
+    const nameLength = view.getUint16(at + 28, true)
+    const offset = view.getUint32(at + 42, true)
+    const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLength))
+    const start = offset + 30 + view.getUint16(offset + 26, true) + view.getUint16(offset + 28, true)
+    parts[name] = new TextDecoder().decode(bytes.subarray(start, start + size))
+    at += 46 + nameLength
+  }
+  return parts
+}
+
+test('the Excel export has a contents sheet and a sheet per entity, with the report amounts as numbers', () => {
+  assert.equal(columnName(0), 'A')
+  assert.equal(columnName(26), 'AA')
+  assert.equal(sheetName('A/B: [test]?'), 'A B   test')
+  const config = createConfig()
+  const year = runYear(config)
+  const entities = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)
+  const { bytes, fileName } = entityWorkbook({ config, year, entities, basis: 'quarter', period: 1, revealed: 6, created: new Date(2026, 10, 13, 13, 45) })
+  assert.equal(fileName, 'PlayTP entity detail Q2 2027.xlsx')
+  const parts = storedZip(bytes)
+  const names = [...parts['xl/workbook.xml'].matchAll(/<sheet name="([^"]+)"/g)].map(match => match[1])
+  assert.deepEqual(names, ['Contents', ...entities.map(id => ENTITIES[id].name)])
+  const us = parts[`xl/worksheets/sheet${names.indexOf('United States') + 1}.xml`]
+  const detail = entityDetail(config, year, 'US', { basis: 'quarter', period: 1, revealed: 6, layers: 'quarter' })
+  // Amounts are written unrounded, so the cells add up exactly as the engine does.
+  assert.ok(us.includes(`<v>${detail.budget.operatingProfit}</v>`) && us.includes(`<v>${detail.actual.usTax.total}</v>`))
+  assert.ok(us.includes('Total US income tax') && us.includes('<pane xSplit="1" ySplit="6"'))
+  const germany = parts[`xl/worksheets/sheet${names.indexOf('Germany') + 1}.xml`]
+  // Imported layers show the duty in their value; Germany buys duty-free within the EU and has no US tax.
+  assert.ok(us.includes('of which customs duty'))
+  assert.ok(!germany.includes('of which customs duty') && !germany.includes('Total US income tax'))
+  assert.ok(parts['xl/worksheets/sheet1.xml'].includes(`location="'United States'!A1"`))
+  // The annual export is named for the full year.
+  assert.equal(entityWorkbook({ config, year, entities: ['US'], basis: 'year', period: 0, revealed: 12 }).fileName, 'PlayTP entity detail full year 2027.xlsx')
 })
