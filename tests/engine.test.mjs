@@ -1309,7 +1309,7 @@ test('the Excel export has a contents sheet and a sheet per entity, with the rep
   assert.equal(fileName, 'PlayTP entity detail Q2 2027.xlsx')
   const parts = storedZip(bytes)
   const names = [...parts['xl/workbook.xml'].matchAll(/<sheet name="([^"]+)"/g)].map(match => match[1])
-  assert.deepEqual(names, ['Contents', ...entities.map(id => ENTITIES[id].name)])
+  assert.deepEqual(names, ['Contents', ...entities.map(id => ENTITIES[id].name), 'Parameters'])
   const us = parts[`xl/worksheets/sheet${names.indexOf('United States') + 1}.xml`]
   const detail = entityDetail(config, year, 'US', { basis: 'quarter', period: 1, revealed: 6, layers: 'quarter' })
   // Amounts are written unrounded, so the cells add up exactly as the engine does.
@@ -1320,6 +1320,17 @@ test('the Excel export has a contents sheet and a sheet per entity, with the rep
   assert.ok(us.includes('of which customs duty'))
   assert.ok(!germany.includes('of which customs duty') && !germany.includes('Total US income tax'))
   assert.ok(parts['xl/worksheets/sheet1.xml'].includes(`location="'United States'!A1"`))
+  // Beside each amount, a formula works it out again. Every rate a formula uses is a named cell on the Parameters sheet.
+  assert.ok(us.includes('<f>B9*C9</f>'), 'units times price')
+  assert.ok(/<f>SUM\(E9:E11[^<]*<\/f>/.test(us), 'goods net sales adds up the sales lines')
+  assert.ok(/<f>\(D\d+-D\d+\)\*Duty_US_from_Poland_\w+<\/f>/.test(us), 'duty is the value before duty times the rate')
+  assert.ok(/<f>E\d+\+E\d+-E\d+<\/f>/.test(us), 'ending stock rolls forward')
+  assert.ok(parts[`xl/worksheets/sheet${names.indexOf('Switzerland') + 1}.xml`].includes("'Germany'!E9:E11"), 'the royalty base reads the distributors’ sheets')
+  const defined = new Set([...parts['xl/workbook.xml'].matchAll(/<definedName name="([^"]+)"/g)].map(match => match[1]))
+  const used = new Set(Object.entries(parts).filter(([name]) => name.startsWith('xl/worksheets/'))
+    .flatMap(([, xml]) => [...xml.matchAll(/<f>([^<]*)<\/f>/g)].flatMap(match => match[1].match(/\b(?:Rate|Markup|Margin|India_Share|BEAT|Duty)_\w+/g) ?? [])))
+  assert.ok(used.size > 10 && [...used].every(name => defined.has(name)), [...used].filter(name => !defined.has(name)).join(', '))
+  assert.ok(!/<f>[^<]*[+-]0[),<]/.test(us), 'no empty terms')
   // The annual export is named for the full year.
   assert.equal(entityWorkbook({ config, year, entities: ['US'], basis: 'year', period: 0, revealed: 12 }).fileName, 'PlayTP entity detail full year 2027.xlsx')
 })

@@ -8,6 +8,9 @@
 // - freeze: { rows, columns } kept in view while scrolling.
 // - merges: ranges such as 'B5:D5'.
 // - links: [{ ref: 'A8', sheet: 'United States' }] jump to another sheet.
+// - flags: [{ range: 'E7:E90', formula: 'ABS(E7-D7)>=0.5' }] colour cells red where the formula holds.
+// A cell { formula: 'B9*C9', style } holds a formula, which the spreadsheet works out when the file opens.
+// names: [{ name: 'Rate_Federal', ref: 'Parameters!$C$5' }] are workbook names that formulas can use.
 // Every sheet prints landscape, one page wide.
 
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
@@ -73,15 +76,17 @@ function styleTable() {
     + '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
     + `<cellXfs count="${formats.length}">${formats.join('')}</cellXfs>`
     + '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+    + '<dxfs count="1"><dxf><font><b/><color rgb="FFC00000"/></font><fill><patternFill patternType="solid"><bgColor rgb="FFFDE7E7"/></patternFill></fill></dxf></dxfs>'
     + '</styleSheet>';
   return { index, toXml };
 }
 
 function cellXml(cell, ref, styles) {
   if (cell === null || cell === undefined) return '';
-  const { value, style } = typeof cell === 'object' ? cell : { value: cell };
+  const { value, style, formula } = typeof cell === 'object' ? cell : { value: cell };
   const s = styles.index(style);
   const styled = s ? ` s="${s}"` : '';
+  if (formula) return `<c r="${ref}"${styled}><f>${xml(cell.formula)}</f></c>`;
   if (typeof value === 'number') {
     // A number that cannot be shown, such as a margin on no revenue, leaves the cell empty.
     return Number.isFinite(value) ? `<c r="${ref}"${styled}><v>${value}</v></c>` : (s ? `<c r="${ref}"${styled}/>` : '');
@@ -91,7 +96,7 @@ function cellXml(cell, ref, styles) {
 }
 
 function sheetXml(sheet, styles, selected) {
-  const { columns = [], rows = [], freeze, merges = [], links = [] } = sheet;
+  const { columns = [], rows = [], freeze, merges = [], links = [], flags = [] } = sheet;
   let view = `<sheetView workbookViewId="0"${selected ? ' tabSelected="1"' : ''}`;
   if (freeze && (freeze.rows || freeze.columns)) {
     const pane = freeze.rows && freeze.columns ? 'bottomRight' : freeze.rows ? 'bottomLeft' : 'topRight';
@@ -107,13 +112,16 @@ function sheetXml(sheet, styles, selected) {
     return body ? `<row r="${rowIndex + 1}">${body}</row>` : '';
   }).join('');
   const merged = merges.length ? `<mergeCells count="${merges.length}">${merges.map(ref => `<mergeCell ref="${ref}"/>`).join('')}</mergeCells>` : '';
+  // A flag colours a cell red when its formula is true, such as a formula result that differs from the model's amount.
+  const flagged = flags.map(({ range, formula }, index) =>
+    `<conditionalFormatting sqref="${range}"><cfRule type="expression" dxfId="0" priority="${index + 1}"><formula>${xml(formula)}</formula></cfRule></conditionalFormatting>`).join('');
   const linked = links.length
     ? `<hyperlinks>${links.map(({ ref, sheet: target }) => `<hyperlink ref="${ref}" location="${xml(`'${target.replaceAll("'", "''")}'!A1`)}" display="${xml(target)}"/>`).join('')}</hyperlinks>` : '';
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="${MAIN}" xmlns:r="${REL}"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><sheetViews>${view}</sheetViews><sheetFormatPr defaultRowHeight="15"/>${cols}<sheetData>${data}</sheetData>${merged}${linked}<pageMargins left="0.5" right="0.5" top="0.6" bottom="0.6" header="0.3" footer="0.3"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/></worksheet>`;
+<worksheet xmlns="${MAIN}" xmlns:r="${REL}"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><sheetViews>${view}</sheetViews><sheetFormatPr defaultRowHeight="15"/>${cols}<sheetData>${data}</sheetData>${merged}${flagged}${linked}<pageMargins left="0.5" right="0.5" top="0.6" bottom="0.6" header="0.3" footer="0.3"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/></worksheet>`;
 }
 
-export function xlsxWorkbook({ sheets, created = new Date() }) {
+export function xlsxWorkbook({ sheets, names: definedNames = [], created = new Date() }) {
   const styles = styleTable();
   const names = [];
   for (const sheet of sheets) {
@@ -124,7 +132,8 @@ export function xlsxWorkbook({ sheets, created = new Date() }) {
   }
   const parts = sheets.map((sheet, index) => [`xl/worksheets/sheet${index + 1}.xml`, sheetXml(sheet, styles, index === 0)]);
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="${MAIN}" xmlns:r="${REL}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${names.map((name, index) => `<sheet name="${xml(name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('')}</sheets></workbook>`;
+<workbook xmlns="${MAIN}" xmlns:r="${REL}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${names.map((name, index) => `<sheet name="${xml(name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('')}</sheets>${definedNames.length
+    ? `<definedNames>${definedNames.map(({ name, ref }) => `<definedName name="${xml(name)}">${xml(ref)}</definedName>`).join('')}</definedNames>` : ''}<calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>`;
   const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="${PACKAGE_REL}">${names.map((name, index) => `<Relationship Id="rId${index + 1}" Type="${REL}/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join('')}<Relationship Id="rId${names.length + 1}" Type="${REL}/styles" Target="styles.xml"/></Relationships>`;
   const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
