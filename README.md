@@ -32,3 +32,7 @@ All amounts are in thousands of US dollars and all unit counts are in thousands,
 ```
 node --test tests/engine.test.mjs
 ```
+
+## Publishing
+
+After changing anything in `src/`, run `node tools/fingerprint.mjs`. It stamps `index.html` with a fingerprint of each code and style file (an import map for the modules), so a reload after a publish loads the changed files at once instead of copies a browser may keep for up to 10 minutes. The tests fail until it has run.

@@ -501,8 +501,8 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
       </div>
       <div class="entity-export">
         <button type="button" class="button" data-action="export-entities" aria-describedby="export-scope">${EXCEL_ICON}Export to Excel</button>
-        <span class="field-note" id="export-scope">All entities · ${basis === 'year' ? 'full year 2027' : `Q${period + 1} 2027`} · with stock layers</span>
       </div>
+      <p class="field-note entity-export-scope" id="export-scope">All entities · ${basis === 'year' ? 'full year 2027' : `Q${period + 1} 2027`} · with stock layers and formulas</p>
     </section>
     ${basis === 'quarter' ? calendar : ''}
     <section class="panel entity-report" aria-labelledby="detail-heading">

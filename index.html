@@ -7,10 +7,29 @@
   <meta name="description" content="PlayTP is a transfer pricing training simulator.">
   <title>PlayTP · 2027 simulation</title>
   <link rel="icon" href="./assets/th-monogram-nav.png" type="image/png">
-  <link rel="stylesheet" href="./src/styles.css">
-  <link rel="stylesheet" href="./src/pricing.css">
-  <link rel="stylesheet" href="./src/training.css">
-  <link rel="stylesheet" href="./src/intro.css">
+  <link rel="stylesheet" href="./src/styles.css?v=0ef38ec14d">
+  <link rel="stylesheet" href="./src/pricing.css?v=8471f860a3">
+  <link rel="stylesheet" href="./src/training.css?v=f500eb235a">
+  <link rel="stylesheet" href="./src/intro.css?v=57097a5b22">
+  <!-- fingerprints: written by tools/fingerprint.mjs -->
+  <script type="importmap">{
+    "imports": {
+      "./src/brief-view.mjs": "./src/brief-view.mjs?v=353a1e1c8d",
+      "./src/engine.mjs": "./src/engine.mjs?v=875486b295",
+      "./src/entity-export.mjs": "./src/entity-export.mjs?v=9be0a50285",
+      "./src/entity-view.mjs": "./src/entity-view.mjs?v=d0c68def76",
+      "./src/format.mjs": "./src/format.mjs?v=602d95ef26",
+      "./src/intro.mjs": "./src/intro.mjs?v=125c351794",
+      "./src/land.mjs": "./src/land.mjs?v=7045c429c7",
+      "./src/main.mjs": "./src/main.mjs?v=99bf546d19",
+      "./src/pricing-view.mjs": "./src/pricing-view.mjs?v=4e8ceb3b72",
+      "./src/simulation.mjs": "./src/simulation.mjs?v=435cae873e",
+      "./src/summary-view.mjs": "./src/summary-view.mjs?v=bd3dba47a8",
+      "./src/xlsx.mjs": "./src/xlsx.mjs?v=497b44c4be",
+      "./src/year-end-view.mjs": "./src/year-end-view.mjs?v=68367119e1"
+    }
+  }</script>
+  <!-- end of fingerprints -->
   <script>
     // Decide before first paint whether the opening sequence plays, so the page never shows ahead of it.
     // It plays once per browser session and not at all when reduced motion is requested. ?intro replays it.
@@ -81,7 +100,7 @@
   <dialog id="year-summary" class="summary-dialog" aria-labelledby="year-summary-title"></dialog>
   <div id="announcement" role="status" class="visually-hidden" aria-live="polite"></div>
   <noscript>This simulation needs JavaScript enabled.</noscript>
-  <script type="module" src="./src/intro.mjs"></script>
-  <script type="module" src="./src/main.mjs"></script>
+  <script type="module" src="./src/intro.mjs?v=125c351794"></script>
+  <script type="module" src="./src/main.mjs?v=99bf546d19"></script>
 </body>
 </html>

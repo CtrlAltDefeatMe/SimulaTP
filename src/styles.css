@@ -223,8 +223,10 @@ tbody tr:hover td, .selected-row td { background: #f4f9fe; }
 /* Entity detail report: one company, budget beside actual. */
 .entity-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 24px; padding: 15px 20px; }
 .entity-controls label.field { flex: 0 1 340px; }
-.entity-export { display: grid; gap: 5px; justify-items: end; margin-left: auto; }
-.entity-export .field-note { margin: 0; text-align: right; }
+/* The button sits alone at the end of the row, so it stays put whatever the period. Its note takes a
+   line of its own below the row, right-aligned, so a longer note cannot move it or reach the controls. */
+.entity-export { margin-left: auto; }
+.entity-export-scope { flex: 0 0 100%; margin: -6px 0 0; text-align: right; }
 .entity-basis { display: grid; gap: 5px; color: var(--secondary); font-size: 12px; font-weight: 650; }
 .entity-table thead tr:first-child th[colspan] { text-align: center; border-bottom-color: var(--border); }
 .entity-table thead th { vertical-align: bottom; }
