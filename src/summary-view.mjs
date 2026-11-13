@@ -30,7 +30,7 @@ function reasons(entry, pricesChanged) {
     costs: driver => {
       const output = entry.id === 'PL' && Math.abs(facts.unitsDeviation) >= 0.005
         ? ` It converted ${rate.format(Math.abs(facts.unitsDeviation))} ${facts.unitsDeviation < 0 ? 'fewer' : 'more'} units than budgeted. Its variable cost moved with output and its fixed overhead did not.` : '';
-      return `Its costs ran ${rate.format(Math.abs(facts.costDeviation))} ${facts.costDeviation < 0 ? 'below' : 'above'} budget while its monthly fee stayed fixed, which ${moved(driver.points, measure)}.${output}`;
+      return `Its costs ran ${rate.format(Math.abs(facts.costDeviation))} ${facts.costDeviation < 0 ? 'below' : 'above'} budget while its quarterly fee stayed fixed, which ${moved(driver.points, measure)}.${output}`;
     },
     fees: driver => `Fee changes at the quarterly reviews ${moved(driver.points, measure)}.`,
     yearEnd: driver => `The year-end adjustment ${moved(driver.points, measure)}.`,
@@ -87,7 +87,7 @@ function adjustedEntities(explanations) {
   const count = explanations.filter(entry => entry.facts.statAdjustment).length;
   if (!count) return 'No tested entity had a GAAP-to-stat adjustment this year, so they match the US GAAP figures you saw during the year.';
   const all = count === explanations.length;
-  return `${all ? `All ${count}` : `${count} of the ${explanations.length}`} tested entities had an unexpected GAAP-to-stat adjustment, which only became visible at the December close.${all ? '' : ' For the others the statutory result matches US GAAP.'}`;
+  return `${all ? `All ${count}` : `${count} of the ${explanations.length}`} tested entities had an unexpected GAAP-to-stat adjustment, which only became visible at the fourth-quarter close.${all ? '' : ' For the others the statutory result matches US GAAP.'}`;
 }
 
 /**
@@ -102,11 +102,11 @@ export function renderYearSummary({ explanations, untouched, adjusted }) {
     ? `${outside.length} of ${explanations.length} tested entities finished the year outside their arm’s-length range.`
     : `All ${explanations.length} tested entities finished the year inside their arm’s-length range.`;
   const context = untouched
-    ? 'No transfer price or service fee was changed during the year, so every result below shows what the market and costs did against prices set in January.'
+    ? 'No transfer price or service fee was changed during the year, so every result below shows what the market and costs did against prices set at the start of the year.'
     : 'Prices or fees were changed during the year. The results below include those changes.';
   return `
     <header class="summary-head">
-      <div><p class="pricing-period-label">2027 · December close</p><h2 id="year-summary-title" tabindex="-1">How the year ended</h2></div>
+      <div><p class="pricing-period-label">2027 · Fourth-quarter close</p><h2 id="year-summary-title" tabindex="-1">How the year ended</h2></div>
       <button class="button" type="button" data-action="close-summary">Close</button>
     </header>
     <div class="summary-body">
@@ -119,7 +119,7 @@ export function renderYearSummary({ explanations, untouched, adjusted }) {
     <footer class="summary-foot">
       <p>${outside.length ? 'A year-end adjustment can still bring these entities into range. Or replay the same year and use the quarterly reviews.' : 'No year-end adjustment is needed.'}</p>
       <div class="view-controls">
-        <button class="button" type="button" data-action="replay-year">Replay the year from January</button>
+        <button class="button" type="button" data-action="replay-year">Replay the year from Q1</button>
         <button class="button primary" type="button" data-action="review-prices">Open the year-end review</button>
       </div>
     </footer>`;

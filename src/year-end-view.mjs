@@ -22,7 +22,7 @@ const rateToTenth = new Intl.NumberFormat('en-US', { style: 'percent', minimumFr
 
 /**
  * The message shown when the licensee finishes the year with an operating loss.
- * `closed` is true once all twelve months are actuals and nothing is left to project.
+ * `closed` is true once all four quarters are actuals and nothing is left to project.
  */
 export function licenseeLossWarning({ royaltyRate, swiss, swissBeforeRoyalty, breakEvenRate, closed = false }) {
   const loss = wholeDollars.format(Math.abs(swiss));
@@ -70,7 +70,7 @@ function scorecard({ yearEnd, entityResults, fullYear, budget, priceRevisions })
   const profitGap = consolidated.operatingProfit - budget.operatingProfit;
   return `<section aria-labelledby="year-end-review-heading" class="year-end-review">
     <div class="panel pricing-period">
-      <div><p class="pricing-period-label">December close</p><h2 id="year-end-review-heading">Year-end review</h2></div>
+      <div><p class="pricing-period-label">Fourth-quarter close</p><h2 id="year-end-review-heading">Year-end review</h2></div>
       <div class="pricing-period-copy"><p>${within === yearEnd.length
         ? 'Every tested entity finished the year inside its arm’s-length range on local statutory results.'
         : `${yearEnd.length - within} of ${yearEnd.length} tested entities finished outside their arm’s-length range on local statutory results. A year-end adjustment can still move them.`}</p>
@@ -111,7 +111,7 @@ function adjustmentForm({ yearEnd, message }) {
   return `<form id="year-end-form" class="pricing-form">
     <section class="panel" aria-labelledby="year-end-adjust-heading">
       <div class="panel-header"><div><h2 id="year-end-adjust-heading">Year-end adjustments</h2>
-        <p class="subtitle" id="year-end-help">The range is tested on the local statutory (stat) result: US GAAP with the stat adjustment revealed at the December close. A positive stat adjustment is extra local cost. For a distributor, a positive amount is paid to its supplier and a negative amount is a credit from it. For Poland and India, a positive amount is an extra fee from their customers and a negative amount is a refund. Adjustments are booked in December. They do not change consolidated profit, except that an increase paid by Asia or Canada attracts customs duty, which the distributor bears. A credit earns no duty refund.</p></div></div>
+        <p class="subtitle" id="year-end-help">The range is tested on the local statutory (stat) result: US GAAP with the stat adjustment revealed at the fourth-quarter close. A positive stat adjustment is extra local cost. For a distributor, a positive amount is paid to its supplier and a negative amount is a credit from it. For Poland and India, a positive amount is an extra fee from their customers and a negative amount is a refund. Adjustments are booked in the fourth quarter. They do not change consolidated profit, except that an increase paid by Asia or Canada attracts customs duty, which the distributor bears. A credit earns no duty refund.</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="year-end-adjust-heading"><table class="year-end-table">
         <thead><tr>
           <th scope="col">Entity</th><th scope="col">Counterparty</th><th scope="col">US GAAP result</th><th scope="col">Stat adjustment</th>

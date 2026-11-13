@@ -26,18 +26,18 @@ function groupRows({ policies, ranges }) {
   const range = kind => `${percent.format(ranges[kind].low)} to ${percent.format(ranges[kind].high)}`;
   return [
     ['United States', 'Manufacturer, IP owner and headquarters',
-      `Keeps the residual on North American sales. Receives the royalty from Switzerland and a fee for headquarters services at cost plus ${percent.format(policies.usServicesMarkup)}. Funds all R&D.`],
+      `Makes Control Systems for the whole group and Precision Components for North America. Sells Control Systems to Switzerland at cost plus ${percent.format(policies.usToSwissMarkup)} and buys Industrial Modules from it. Keeps the residual on North American sales. Receives the royalty from Switzerland and a fee for headquarters services at cost plus ${percent.format(policies.usServicesMarkup)}. Funds all R&D.`],
     ['Switzerland', 'European principal',
-      `Buys conversion from Poland, owns the stock in the Belgian warehouse, and sells to the European and Asian distributors and to independent distributors. Keeps the residual after routine returns and a ${percent.format(policies.royaltyRate)} royalty on European third-party sales.`],
+      `Buys conversion from Poland, which makes Industrial Modules for the whole group and Precision Components for Europe and Asia. Sells Industrial Modules to the United States at cost plus ${percent.format(policies.swissToUsMarkup)} and buys Control Systems from it. Owns the stock in the Belgian warehouse, and sells to the European and Asian distributors and to independent distributors. Keeps the residual after routine returns and a ${percent.format(policies.royaltyRate)} royalty on European third-party sales.`],
     ['Poland', 'Toll manufacturer',
-      `A fixed monthly fee: budgeted conversion cost plus ${percent.format(policies.polandMarkup)}. Markup range ${range('toll')}.`],
+      `A fixed quarterly fee: budgeted conversion cost plus ${percent.format(policies.polandMarkup)}. Markup range ${range('toll')}.`],
     ['Belgium', 'Warehouse operator', `A fee that leaves a ${percent.format(policies.belgiumMargin)} operating margin.`],
     ['Germany, France, United Kingdom', 'Limited-risk distributors',
       `Goods prices set for a ${percent.format(policies.lrdMargin)} operating margin. Range ${range('lrd')}.`],
     ['Asia, Canada', 'Full-fledged distributors',
       `Goods prices set for a ${percent.format(policies.ffdMargin)} operating margin. Range ${range('ffd')}. Switzerland supplies Asia and the United States supplies Canada.`],
     ['India', 'Shared services',
-      `A fixed monthly fee: budgeted cost plus ${percent.format(policies.indiaServicesMarkup)}. Markup range ${range('services')}.`],
+      `A fixed quarterly fee: budgeted cost plus ${percent.format(policies.indiaServicesMarkup)}. Markup range ${range('services')}.`],
   ];
 }
 
@@ -51,6 +51,7 @@ export function renderBrief({ config, revealed }) {
         <div class="brief-copy">
           <p>You lead transfer pricing for a US-headquartered industrial group. It makes three product families in the United States and Poland and sells them to third-party customers in North America, Europe and Asia.</p>
           <p>The lines are not equally profitable. Control Systems earns a high margin, Precision Components a middling one and Industrial Modules a thin one. The order is the same in every market, though price levels differ.</p>
+          <p>Each line has its plant. Control Systems is made only in the United States and Industrial Modules only in Poland, so the United States sells Control Systems to Switzerland and Switzerland sells Industrial Modules to the United States. Both plants make Precision Components for their own region.</p>
           <p>The 2027 budget is set and the year is about to start. All figures are synthetic and in US dollars.</p>
         </div>
       </section>
@@ -58,8 +59,8 @@ export function renderBrief({ config, revealed }) {
         <div class="panel-header"><h2 id="brief-job-heading">Your job</h2></div>
         <div class="brief-copy">
           <p>Keep seven tested entities inside their arm’s-length ranges for the full year: the five distributors, the Polish toll manufacturer and the Indian service center.</p>
-          <p>Demand, sales prices and costs move away from budget every month, and each market moves differently. Your levers are the prices the distributors pay for goods and the fixed monthly fees paid to Poland and India. You can reset them after the March, June and September closes and post a year-end adjustment after December.</p>
-          <p>The figures you see during the year are US GAAP. The ranges are tested on local statutory results, which only appear at the December close.</p>
+          <p>Demand, sales prices and costs move away from budget every quarter, and each market moves differently. Your levers are the prices the distributors pay for goods and the fixed quarterly fees paid to Poland and India. You can reset them after the first, second and third quarters and post a year-end adjustment after the fourth.</p>
+          <p>The figures you see during the year are US GAAP. The ranges are tested on local statutory results, which only appear at the fourth-quarter close.</p>
         </div>
       </section>
     </div>
@@ -77,16 +78,17 @@ export function renderBrief({ config, revealed }) {
         <div class="panel-header"><h2 id="brief-year-heading">How the year runs</h2></div>
         <ol class="brief-steps">
           <li>Read the budget on the <a href="#dashboard">Dashboard</a> and trace the flows on the <a href="#map">Transaction map</a>. <a href="#entities">Entity detail</a> breaks each company down into units, prices, fees and stock.</li>
-          <li>Reveal actuals one month at a time. The variance bridge explains each month’s gap to budget.</li>
-          <li>After the March, June and September closes, open <a href="#pricing">Transfer prices</a>. The forecast shows where each tested entity will finish the year at current prices and fees. Take the policy price or fee, enter your own, or leave them alone.</li>
-          <li>New prices apply to new shipments only. Each distributor holds about two months of stock, which keeps its old cost and is sold first, so a price change takes about two months to reach its cost of sales.</li>
-          <li>Poland and India are paid a fixed monthly fee, but their costs move. Part of Poland’s cost is fixed overhead. In a slow month its cost falls by less than its output and the fee does not fall at all, so its markup rises. A busy month does the reverse.</li>
+          <li>Reveal actuals one quarter at a time. The variance bridge explains each quarter’s gap to budget.</li>
+          <li>After the Q1, Q2 and Q3 closes, open <a href="#pricing">Transfer prices</a>. The forecast shows where each tested entity will finish the year at current prices and fees. Take the policy price or fee, enter your own, or leave them alone.</li>
+          <li>New prices apply to new shipments only. Each distributor holds about two months of stock, which keeps its old cost and is sold first. In the quarter a new price takes effect, about two-thirds of the units sold still carry the old price. From the next quarter all of them carry the new one.</li>
+          <li>Each plant has a monthly limit for each line it makes. When a plant is at its limit for Precision Components, the other plant makes the shortfall as far as its own limit allows. Control Systems and Industrial Modules have no second plant: once the stock is gone, the demand goes unmet and the sale is lost.</li>
+          <li>Poland and India are paid a fixed quarterly fee, but their costs move. Part of Poland’s cost is fixed overhead. In a slow quarter its cost falls by less than its output and the fee does not fall at all, so its markup rises. A busy quarter does the reverse.</li>
           <li>${priceFloor?.enabled
             ? `A price floor is in force. No goods price can go below standard cost plus ${percent.format(priceFloor.markup)}, and a year-end credit cannot undo it. The floor takes priority over a distributor’s range, and the Transfer prices page says where it binds and what it does to the distributor’s margin.`
             : 'No price floor is set, so a goods price can fall below the supplier’s standard cost. Prices below cost are flagged in red on the Dashboard and the Transfer prices page. You can set a floor in Scenario settings.'}</li>
-          <li>At the December close each entity outside the United States has a ${percent.format(config.simulation?.statAdjustment?.probability ?? 1)} chance of an unexpected GAAP-to-stat adjustment: up to ${percent.format(config.simulation?.statAdjustment?.max ?? 0)} of its operating expenses, up or down. A result inside the range on US GAAP can land outside it in the local accounts.</li>
+          <li>At the fourth-quarter close each entity outside the United States has a ${percent.format(config.simulation?.statAdjustment?.probability ?? 1)} chance of an unexpected GAAP-to-stat adjustment: up to ${percent.format(config.simulation?.statAdjustment?.max ?? 0)} of its operating expenses, up or down. A result inside the range on US GAAP can land outside it in the local accounts.</li>
           <li>A pop-up then explains where each tested entity finished and why. Choose a year-end adjustment for each one and read the year-end review.</li>
-          <li>To see what happens when nobody acts, use <strong>Run the full year</strong> on the Dashboard. It reveals every month at unchanged prices and fees. You can then replay the same year and manage it.</li>
+          <li>To see what happens when nobody acts, use <strong>Run the full year</strong> on the Dashboard. It reveals every quarter at unchanged prices and fees. You can then replay the same year and manage it.</li>
         </ol>
       </section>
       <section class="panel" aria-labelledby="brief-cost-heading">
@@ -103,9 +105,9 @@ export function renderBrief({ config, revealed }) {
       <ul class="brief-steps">
         <li>Run the full year without touching a price. Which entities finish outside their range, and what put them there?</li>
         <li>Which distributors needed a price change at each review, and which stayed inside their range without one?</li>
-        <li>Poland’s fee is fixed but its output is not. Why does its markup rise in a slow month, and which entity carries the cost of the idle capacity?</li>
+        <li>Poland’s fee is fixed but its output is not. Why does its markup rise in a slow quarter, and which entity carries the cost of the idle capacity?</li>
         <li>Which entities were inside their range on US GAAP and outside it on local statutory results? Could you have priced for that during the year?</li>
-        <li>How much of a March price change reaches the full-year margin? What would the same change achieve in September?</li>
+        <li>How much of a price change made after Q1 reaches the full-year margin? What would the same change achieve after Q3?</li>
         <li>Switzerland keeps the residual on European and Asian sales after routine returns and the royalty. The United States owns the IP and funds the R&amp;D. Does a ${percent.format(policies.royaltyRate)} royalty leave the profit where the functions, assets and risks sit? Change the rate in Scenario settings and watch the split.</li>
         <li>Where does the policy price for Industrial Modules fall below the supplier’s standard cost? Who should bear that loss, and what does a price floor do to the distributor’s margin?</li>
         <li>When is a year-end adjustment to the edge of the range enough, and when is the target the better aim?</li>
@@ -117,7 +119,7 @@ export function renderBrief({ config, revealed }) {
       <dl class="glossary">${glossary.map(([term, meaning]) => `<div><dt>${html(term)}</dt><dd>${html(meaning)}</dd></div>`).join('')}</dl>
     </section>
     <div class="panel brief-start">
-      <p>${revealed ? `${revealed} of 12 months are revealed.` : 'The budget is ready. No actuals are revealed yet.'}</p>
+      <p>${revealed ? `${revealed} of 4 quarters ${revealed === 1 ? 'is' : 'are'} revealed.` : 'The budget is ready. No actuals are revealed yet.'}</p>
       <button class="button primary" type="button" data-action="start">${start}</button>
     </div>`;
 }
