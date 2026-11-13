@@ -21,9 +21,10 @@ The simulator uses a synthetic scenario. Tax and duty rates are illustrative. Sc
 - An entity detail report for each legal entity, by quarter or for the year, budget beside actual: units and net sales price by product line and buyer, cost of sales as units times inventory value, service cost and markup shown separately for the service entities, the Swiss royalty and its base, and beginning and ending inventory. The annual view sets the full-year budget beside actuals to date. Cost of sales and stock can be broken out into first-in, first-out layers by when the units came in, with the transfer price and customs duty behind each layer, so a price change can be followed from the quarter it is bought into cost of sales. A quarter bought at one price is one layer
 - Quarterly reviews of goods prices and service fees, and year-end adjustments. Each distributor holds about two months of stock on a FIFO basis, so about two-thirds of the units sold in the quarter a price changes still carry the old price
 - A default group that earns a consolidated operating margin in the high teens (17.8%), with a high-margin, a mid-margin and a thin-margin product line in every market
+- US federal tax under the rules for tax years beginning after 2025: the FDDEI deduction (33.34%, with no interest or R&E allocated), tax on net CFC tested income (NCTI: 40% deduction, 90% deemed-paid credit, no QBAI return) and BEAT (10.5%, 3% base erosion percentage), plus state tax. The working is on Entity detail for the United States
 - Income tax by entity, and customs duty on declared transfer prices. The importer adds duty to the cost of the goods, so it reaches cost of sales when they are sold. Duty rates are set by importing block (Europe including Switzerland and the United Kingdom, the United States, Canada, Asia), by where the goods were made (United States or Poland) and by product line
 
-All amounts are in US dollars. There is no currency layer.
+All amounts are in thousands of US dollars and all unit counts are in thousands, so a price per unit is in dollars. Amounts show as whole numbers; headline figures show the real size, such as $2.38B. There is no currency layer.
 
 ## Tests
 

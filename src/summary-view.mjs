@@ -1,8 +1,10 @@
 import { ENTITIES, PRODUCTS } from './engine.mjs';
+import { realSize } from './format.mjs';
 
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const rate = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
-const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+// Prose shows amounts at their real size, such as $11.95M. The model's amounts are in thousands.
+const dollars = realSize;
 const pointsFormat = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range' };
 const driverLabels = {

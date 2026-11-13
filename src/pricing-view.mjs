@@ -1,7 +1,9 @@
 import { DISTRIBUTOR_COST_RATE, ENTITIES, POLICY_LABELS, PRODUCTS } from './engine.mjs';
 import { allocationPanel, renderYearEnd } from './year-end-view.mjs';
+import { IN_THOUSANDS, thousands, unitPrice } from './format.mjs';
 
-const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+// Goods prices are per unit, in dollars and cents. Fees and results are in thousands of dollars.
+const dollars = unitPrice;
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const compactPercent = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 4 });
 const markupPercent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -10,9 +12,9 @@ const reviewMonths = [3, 6, 9];
 const QUARTER_MONTHS = 3;
 const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range', off: 'Out of policy' };
 const resultColumns = [
-  ['revenue', 'Net sales', dollars],
-  ['rdExpense', 'R&D expense', dollars],
-  ['operatingProfit', 'Operating profit', dollars],
+  ['revenue', 'Net sales', thousands],
+  ['rdExpense', 'R&D expense', thousands],
+  ['operatingProfit', 'Operating profit', thousands],
   ['operatingMargin', 'Operating margin', percent],
 ];
 function html(value) {
@@ -169,20 +171,21 @@ function pricingTable(routes, editing, priceFloor) {
 const serviceNames = { PL: 'Toll manufacturing', IN: 'Shared services' };
 
 function feeInput(service) {
-  const label = `New quarterly fee in USD, ${entityName(service.id)}`;
+  const label = `New quarterly fee in ${IN_THOUSANDS}, ${entityName(service.id)}`;
   return `<div class="price-input">
     <span aria-hidden="true">$</span>
-    <input type="number" inputmode="decimal" min="0" step="0.01" aria-label="${html(label)}"
+    <input type="number" inputmode="numeric" min="0" step="1" aria-label="${html(label)}"
       aria-describedby="pricing-override-help" data-service-fee="${html(service.id)}">
   </div>`;
 }
 
 function policyFeeButton(service) {
   if (!Number.isFinite(service.recommended)) return '—';
-  const quarterly = service.recommended * QUARTER_MONTHS;
-  const display = dollars.format(quarterly);
-  const label = `Use policy fee ${display} a quarter for ${entityName(service.id)}`;
-  return `<button class="pricing-quote" type="button" aria-label="${html(label)}" data-goods-price-quote="${quarterly.toFixed(2)}">${display}</button>`;
+  // A fee is entered in whole thousands.
+  const quarterly = Math.round(service.recommended * QUARTER_MONTHS);
+  const display = thousands.format(quarterly);
+  const label = `Use policy fee ${display} thousand a quarter for ${entityName(service.id)}`;
+  return `<button class="pricing-quote" type="button" aria-label="${html(label)}" data-goods-price-quote="${quarterly}">${display}</button>`;
 }
 
 // Poland and India are paid a fixed fee each quarter, so their markup moves with their cost.
@@ -198,7 +201,7 @@ function serviceFeeTable(services, actual, serviceBudget, editing) {
     return { cost, budget: total(serviceBudget.slice(0, actual.length), id, 'cost'), fees: total(months, id, 'fee') };
   };
   return `<section class="panel" aria-labelledby="service-fee-heading">
-    <div class="panel-header"><div><h2 id="service-fee-heading">Service fees</h2><p class="subtitle">USD per quarter · a fixed fee set from budgeted cost plus the policy markup</p></div></div>
+    <div class="panel-header"><div><h2 id="service-fee-heading">Service fees</h2><p class="subtitle">${IN_THOUSANDS} per quarter · a fixed fee set from budgeted cost plus the policy markup</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="service-fee-heading">
       <table class="pricing-table service-fee-table" aria-labelledby="service-fee-heading">
         <thead><tr>
@@ -211,11 +214,11 @@ function serviceFeeTable(services, actual, serviceBudget, editing) {
             <th scope="row" class="pricing-channel">${html(entityName(service.id))} <span aria-hidden="true">→</span><span class="visually-hidden"> to </span> ${html(service.customers.map(entityName).join(', '))}
               <small class="pricing-margin-target">${serviceNames[service.id]}</small></th>
             <td class="pricing-policy">Cost + ${compactPercent.format(service.target)}<small class="pricing-margin-target">Range ${compactPercent.format(service.low)}–${compactPercent.format(service.high)}</small></td>
-            <td>${format(perQuarter(service.budgetCost))}</td>
-            <td>${ytd ? `${format(ytd.cost)}<small class="pricing-margin-target">${ytd.cost < ytd.budget ? '−' : '+'}${markupPercent.format(Math.abs(ytd.cost / ytd.budget - 1))} vs budget to date</small>` : '—'}</td>
+            <td>${format(perQuarter(service.budgetCost), thousands)}</td>
+            <td>${ytd ? `${format(ytd.cost, thousands)}<small class="pricing-margin-target">${ytd.cost < ytd.budget ? '−' : '+'}${markupPercent.format(Math.abs(ytd.cost / ytd.budget - 1))} vs budget to date</small>` : '—'}</td>
             <td>${ytd ? percent.format(ytd.fees / ytd.cost - 1) : '—'}</td>
-            <td>${format(perQuarter(service.fee))}<small class="pricing-margin-target">${markupPercent.format(service.fee / service.budgetCost - 1)} on budget cost</small></td>
-            <td>${editing ? policyFeeButton(service) : format(perQuarter(service.recommended))}</td>
+            <td>${format(perQuarter(service.fee), thousands)}<small class="pricing-margin-target">${markupPercent.format(service.fee / service.budgetCost - 1)} on budget cost</small></td>
+            <td>${editing ? policyFeeButton(service) : format(perQuarter(service.recommended), thousands)}</td>
             <td class="pricing-edit">${editing ? feeInput(service) : '—'}</td>
           </tr>`;
         }).join('')}</tbody>
@@ -230,8 +233,8 @@ function entityResultsPanel(revealed, rows, routes) {
   const actualHeading = revealed ? `YTD actuals through ${quarterName(revealed)}` : 'YTD actuals';
   const title = showForecast ? 'YTD actuals and full-year forecast' : 'Full-year actuals';
   const detail = showForecast
-    ? 'US GAAP. The forecast combines YTD actuals with budget assumptions for the remaining quarters at current transfer prices and fees. Range checks are provisional until the fourth-quarter close, when they move to local statutory results.'
-    : 'Full year 2027 · US GAAP, with each range tested on the local statutory result';
+    ? `${IN_THOUSANDS} · US GAAP. The forecast combines YTD actuals with budget assumptions for the remaining quarters at current transfer prices and fees. Range checks are provisional until the fourth-quarter close, when they move to local statutory results.`
+    : `Full year 2027 · ${IN_THOUSANDS} · US GAAP, with each range tested on the local statutory result`;
   const columnHeadings = (isForecast = false) => resultColumns.map(([, label], index) =>
     `<th scope="col"${isForecast && index === 0 ? ' class="pricing-forecast-first"' : ''}>${html(label)}</th>`).join('');
   const targets = new Map(routes.map(({ to, targetMargin }) => [to, targetMargin]));
@@ -256,7 +259,7 @@ function entityResultsPanel(revealed, rows, routes) {
       policyDetails += detail(`Target ${percent.format(policy.target)}`);
       if (policy.outOfPolicy) {
         policyDetails += `<small class="pricing-policy-status">${statusLabels[policy.status] ?? statusLabels.off}</small>`;
-        if (policy.exposure > 0) policyDetails += `<small class="pricing-policy-status">Tax at risk ${dollars.format(policy.exposure)}</small>`;
+        if (policy.exposure > 0) policyDetails += `<small class="pricing-policy-status">Tax at risk ${thousands.format(policy.exposure)}</small>`;
       } else if (policy.status === 'within' && Number.isFinite(policy.low) && Number.isFinite(policy.forecast)) {
         policyDetails += `<small class="pricing-policy-ok">${statusLabels.within}</small>`;
       }
@@ -338,7 +341,7 @@ export function renderGoodsPricing(review) {
         <h2 id="pricing-period-heading">${periodLabel(effectiveMonth)}</h2>
       </div>
       <div class="pricing-period-copy">
-        <p id="pricing-override-help">Select a policy price or fee, or enter your own in USD. Goods prices are per unit and service fees are per quarter. Blank fields keep their current values.</p>
+        <p id="pricing-override-help">Select a policy price or fee, or enter your own. Goods prices are in USD per unit, with cents. Service fees are in ${IN_THOUSANDS} per quarter, as whole numbers. Blank fields keep their current values.</p>
       </div>
     </section>
     ${prices}
@@ -377,7 +380,7 @@ export function readServiceFees(form) {
     if (input.value === '') continue;
     const fee = input.valueAsNumber;
     if (!Number.isFinite(fee) || fee < 0 || input.validity.stepMismatch || !Number.isSafeInteger(Math.round(fee * 100))) {
-      throw new RangeError('Enter a nonnegative quarterly fee in USD with up to two decimal places.');
+      throw new RangeError('Enter a nonnegative quarterly fee in USD thousands, as a whole number.');
     }
     // The fee is entered for the quarter and charged a third each month.
     fees[input.dataset.serviceFee] = fee / QUARTER_MONTHS;

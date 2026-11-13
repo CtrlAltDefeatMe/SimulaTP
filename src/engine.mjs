@@ -113,7 +113,21 @@ const POLICY_KINDS = {
 }
 const policyKind = id => id === 'PL' ? 'toll' : id === 'IN' ? 'services' : LRD.has(id) ? 'lrd' : 'ffd'
 // Illustrative statutory income tax rates. They are scenario assumptions, not tax advice.
+// The US rate is the federal 21% plus state tax.
 const DEFAULT_TAX_RATES = { US: 0.25, CH: 0.15, PL: 0.19, BE: 0.25, DE: 0.30, FR: 0.25, UK: 0.25, APAC: 0.17, CA: 0.265, IN: 0.25 }
+// US federal rules for tax years beginning after 2025, as amended by Pub. L. 119-21.
+export const US_TAX_RULES = Object.freeze({
+  federalRate: 0.21,
+  // Section 250 deductions: on foreign-derived deduction eligible income (FDDEI), and on
+  // net CFC tested income (NCTI) with its section 78 gross-up.
+  fddeiDeduction: 0.3334, nctiDeduction: 0.40,
+  // Share of the foreign income taxes on tested income that is deemed paid and creditable.
+  nctiCreditShare: 0.90,
+  // Base erosion and anti-abuse tax: the rate on modified taxable income, the base erosion
+  // percentage at or above which it applies, and the annual gross receipts it needs, in
+  // thousands of dollars like every amount in the model.
+  beatRate: 0.105, beatThreshold: 0.03, beatGrossReceipts: 500_000,
+})
 // Customs territories. The EU, Switzerland and the United Kingdom are treated as one block.
 export const CUSTOMS_BLOCKS = {
   EU: { name: 'Europe', members: 'EU, Switzerland and United Kingdom' },
@@ -208,6 +222,9 @@ export function upgradeConfig(config, started) {
   const defaults = createConfig()
   const upgraded = { ...config }
   for (const key of ['tax', 'customs', 'priceFloor', 'services', 'serviceFeeSchedule']) upgraded[key] ??= defaults[key]
+  upgraded.tax = { ...defaults.tax, ...upgraded.tax }
+  // BEAT's gross receipts test used to be a setting. It is now worked out from the US parent's receipts.
+  delete upgraded.tax.beatGrossReceipts
   upgraded.ranges = { ...defaults.ranges, ...upgraded.ranges }
   upgraded.yearEnd = { ...defaults.yearEnd, ...upgraded.yearEnd }
   // A scenario saved before R&D existed ran without it.
@@ -895,7 +912,7 @@ function sellGoods(stock, book, plans, shocks) {
       const channel = LRD.has(seller) ? 'LRD' : isDistributor ? 'FFD' : seller === 'CH' ? 'direct' : 'domestic'
       const customer = seller === 'CH' ? 'UNRELATED' : 'THIRD_PARTY'
       const policy = { LRD: 'LRD_EXTERNAL_SALE', FFD: 'FFD_EXTERNAL_SALE', direct: 'UNRELATED_SALE', domestic: 'US_DOMESTIC_SALE' }[channel]
-      sales.push({ seller, customer, channel, product: family, demand, quantity, price, revenue, groupCogs, materialCogs, unfilled: demand - quantity })
+      sales.push({ seller, customer, channel, product: family, demand, quantity, price, revenue, localCogs, groupCogs, materialCogs, unfilled: demand - quantity })
       if (quantity) book.transfer({
         from: seller, to: customer, category: 'goods', policy, product: family, quantity, amount: revenue, external: true,
       })
@@ -1059,15 +1076,154 @@ function statutoryResults({ months: priorMonths, statRates }, entities) {
 }
 
 // Local tax is charged on local accounts. `stat` holds them once the year is closed.
-function taxFor(config, entities, stat = null) {
+// The United States is taxed under its federal rules, with FDDEI, NCTI and BEAT, plus
+// state tax. Its `rate` is the effective rate on its operating profit.
+function taxFor(config, months, stat = null) {
   const byEntity = Object.fromEntries(TAXED_ENTITIES.map(id => {
+    const profit = stat?.[id]?.operatingProfit ?? sum(months.map(month => month.entities[id].operatingProfit))
+    if (id === 'US') {
+      const detail = usIncomeTax(config, months, stat)
+      return [id, { rate: profit ? detail.total / profit : 0, profit, tax: detail.total, detail }]
+    }
     const rate = taxRate(config, id)
-    const profit = stat?.[id]?.operatingProfit ?? entities[id].operatingProfit
     return [id, { rate, profit, tax: rate * profit }]
   }))
   const total = sum(Object.values(byEntity).map(entity => entity.tax))
   const profit = sum(Object.values(byEntity).map(entity => entity.profit))
   return { entities: byEntity, total, profit, effectiveRate: profit ? total / profit : 0 }
+}
+
+// The foreign subsidiaries, all treated as controlled foreign corporations wholly owned by the US parent.
+const CFCS = ALL_COMPANIES.filter(id => id !== 'US')
+
+/**
+ * The US parent's income tax for a set of closed periods, computed as if they were its
+ * tax year: federal tax at 21% with the section 250 deductions for FDDEI and NCTI, the
+ * deemed-paid credit on NCTI and the BEAT, plus state tax at the rest of its rate.
+ * `stat` holds the year's local statutory results once the year is closed: the CFCs'
+ * foreign taxes follow them. Taxable income is taken to equal US GAAP operating profit,
+ * with no interest, no NOLs and no credits other than the NCTI credit.
+ */
+export function usIncomeTax(config, months, stat = null) {
+  const rules = US_TAX_RULES
+  const add = pick => sum(months.map(pick))
+  const us = rollupPnl(months.map(month => month.entities.US))
+  const lines = months.flatMap(month => month.transactions)
+  const find = (policy, from, to) => lines.filter(line => line.policy === policy && line.from === from && line.to === to)
+  const total = (list, key = 'amount') => sum(list.map(line => line[key] ?? 0))
+
+  // State tax, on US operating profit. It is deductible for federal purposes.
+  const stateRate = Math.max(0, taxRate(config, 'US') - rules.federalRate)
+  const state = stateRate * Math.max(0, us.operatingProfit)
+
+  // Gross receipts by kind. Sales to Canada and Switzerland are resold to unrelated
+  // customers abroad, the royalty is for foreign use of the IP, and the headquarters
+  // services are for Switzerland: all are foreign-derived.
+  const domesticSales = months.flatMap(month => month.sales.filter(sale => sale.seller === 'US'))
+  const domestic = { receipts: sum(domesticSales.map(sale => sale.revenue)), cogs: sum(domesticSales.map(sale => sale.localCogs)) }
+  const goodsAbroad = [...find('FFD_GOODS', 'US', 'CA'), ...find('US_TO_CH', 'US', 'CH')]
+  const adjustment = total(find('YEAR_END_ADJUSTMENT', 'US', 'CA'))
+  const goods = { receipts: total(goodsAbroad) + adjustment, cogs: total(goodsAbroad, 'basis') }
+  const royalty = total(find('CH_ROYALTY', 'CH', 'US'))
+  const headquarters = find('US_SERVICES', 'US', 'CH')
+  const services = { receipts: total(headquarters), cost: total(headquarters, 'basis') }
+  const foreignReceipts = goods.receipts + royalty + services.receipts
+  const receipts = domestic.receipts + foreignReceipts
+  // Anything not traced to a kind of receipt stays with domestic income.
+  const otherReceipts = us.revenue - receipts
+  const otherCogs = us.cogs - domestic.cogs - goods.cogs
+
+  // FDDEI: foreign-derived gross income less the deductions properly allocable to it,
+  // other than interest and R&E. Headquarters services cost is allocated to the fee it
+  // earns. Other operating expenses and state tax are apportioned on gross receipts.
+  const apportioned = us.otherOperatingExpenses - services.cost + state
+  const foreignShare = receipts + otherReceipts > 0 ? foreignReceipts / (receipts + otherReceipts) : 0
+  const foreignIncome = goods.receipts - goods.cogs + royalty + services.receipts - services.cost
+  const fddei = foreignIncome - foreignShare * apportioned
+  // Deduction eligible income: all of the US parent's income, on the same rules.
+  const dei = us.revenue - us.cogs - us.otherOperatingExpenses - state
+  const fddeiBase = dei > 0 ? Math.max(0, Math.min(fddei, dei)) : 0
+
+  // NCTI: each CFC's tested income is its profit less its foreign income tax, which
+  // follows its local statutory profit once the year is closed. Tested losses offset
+  // tested income. No QBAI return is deducted.
+  const cfcs = CFCS.map(id => {
+    const profit = add(month => month.entities[id].operatingProfit)
+    const local = stat?.[id]?.operatingProfit ?? profit
+    const foreignTax = Math.max(0, taxRate(config, id) * local)
+    return { id, profit, foreignTax, tested: profit - foreignTax }
+  })
+  const testedIncome = sum(cfcs.filter(cfc => cfc.tested > 0).map(cfc => cfc.tested))
+  const testedLoss = sum(cfcs.filter(cfc => cfc.tested < 0).map(cfc => cfc.tested))
+  const ncti = Math.max(0, testedIncome + testedLoss)
+  const inclusion = testedIncome > 0 ? ncti / testedIncome : 0
+  const testedTaxes = sum(cfcs.filter(cfc => cfc.tested > 0).map(cfc => cfc.foreignTax))
+  const grossUp = inclusion * testedTaxes
+  const deemedPaid = rules.nctiCreditShare * inclusion * testedTaxes
+
+  // Section 250, limited to taxable income: where FDDEI and NCTI with its gross-up exceed
+  // taxable income before the deduction, both are cut back in proportion.
+  const beforeDeduction = us.operatingProfit - state + ncti + grossUp
+  const claimed = fddeiBase + ncti + grossUp
+  const limitShare = claimed > 0 ? Math.min(1, Math.max(0, beforeDeduction) / claimed) : 1
+  const fddeiAllowed = fddeiBase * limitShare
+  const nctiAllowed = (ncti + grossUp) * limitShare
+  const fddeiDeduction = rules.fddeiDeduction * fddeiAllowed
+  const nctiDeduction = rules.nctiDeduction * nctiAllowed
+  const taxableIncome = beforeDeduction - fddeiDeduction - nctiDeduction
+  const taxBeforeCredits = rules.federalRate * Math.max(0, taxableIncome)
+
+  // The NCTI credit is limited to the US tax on the NCTI basket. Only the section 250
+  // deduction is allocated to it, so the basket holds NCTI with its gross-up less that
+  // deduction. Credits above the limit are lost.
+  const basketIncome = ncti + grossUp - nctiDeduction
+  const creditLimit = taxableIncome > 0 ? taxBeforeCredits * Math.min(1, Math.max(0, basketIncome) / taxableIncome) : 0
+  const credit = Math.min(deemedPaid, creditLimit)
+  const regularTax = taxBeforeCredits - credit
+
+  // BEAT. Deductible payments to foreign related parties are base erosion payments: the
+  // R&D services from Germany and Poland in full, since R&D cannot use the services cost
+  // method, and the markup on India's fee, whose cost is excepted under that method.
+  // Goods bought from Switzerland enter cost of goods sold and are not deductions.
+  const research = total(lines.filter(line => line.policy === 'RD_SERVICES' && line.to === 'US'))
+  const india = lines.filter(line => line.policy === 'IN_SERVICES' && line.to === 'US')
+  const indiaCost = total(india, 'basis')
+  const indiaMarkup = Math.max(0, total(india) - indiaCost + total(find('SERVICE_TRUE_UP', 'IN', 'US')))
+  const baseErosionBenefits = research + indiaMarkup
+  // The base erosion percentage compares them with all deductions, leaving out cost of
+  // goods sold, the section 250 deduction and the excepted service cost.
+  const deductions = us.otherOperatingExpenses + us.rdExpense + state - indiaCost
+  const baseErosionPercentage = deductions > 0 ? baseErosionBenefits / deductions : 0
+  // The test averages three prior years. The model has one, so it takes this one, scaled to a full year.
+  const monthsCovered = sum(months.map(month => month.months?.length ?? 1))
+  const grossReceipts = monthsCovered ? us.revenue * 12 / monthsCovered : 0
+  const grossReceiptsMet = grossReceipts >= rules.beatGrossReceipts
+  const beatApplies = grossReceiptsMet && baseErosionPercentage >= rules.beatThreshold
+  const modifiedTaxableIncome = taxableIncome + baseErosionBenefits
+  const minimumTax = rules.beatRate * Math.max(0, modifiedTaxableIncome)
+  const beat = beatApplies ? Math.max(0, minimumTax - regularTax) : 0
+
+  return {
+    operatingProfit: us.operatingProfit, stateRate, state,
+    fddei: {
+      goods: goods.receipts, adjustment, royalty, services: services.receipts, foreignReceipts, receipts: receipts + otherReceipts,
+      foreignShare, goodsCogs: goods.cogs, servicesCost: services.cost, apportioned, apportionedToForeign: foreignShare * apportioned,
+      research: us.rdExpense, income: fddei, dei, base: fddeiBase, allowed: fddeiAllowed, deduction: fddeiDeduction,
+      domestic: domestic.receipts + otherReceipts, domesticCogs: domestic.cogs + otherCogs,
+    },
+    ncti: {
+      cfcs, testedIncome, testedLoss, amount: ncti, inclusion, testedTaxes, grossUp, allowed: nctiAllowed, deduction: nctiDeduction,
+      basketIncome, taxBeforeCredit: taxableIncome > 0 ? taxBeforeCredits * Math.min(1, Math.max(0, basketIncome) / taxableIncome) : 0,
+      deemedPaid, credit, excessCredit: deemedPaid - credit, residual: Math.max(0, creditLimit - credit),
+    },
+    limitShare, beforeDeduction, taxableIncome, taxBeforeCredits, credit, regularTax,
+    beat: {
+      research, indiaFee: total(india), indiaCost, indiaMarkup, benefits: baseErosionBenefits, deductions,
+      percentage: baseErosionPercentage, grossReceipts, grossReceiptsMet, applies: beatApplies, modifiedTaxableIncome, minimumTax, amount: beat,
+    },
+    federal: regularTax + beat,
+    total: regularTax + beat + state,
+  }
 }
 
 const emptyLanes = config => Object.fromEntries(CUSTOMS_LANES.map(({ key, importer, origin }) => [key, {
@@ -1130,7 +1286,6 @@ export function unfilledDemand(month) {
 
 /** Total income tax and customs duty for a set of closed months. */
 export function summarizeTaxAndCustoms(config, months) {
-  const entities = Object.fromEntries(TAXED_ENTITIES.map(id => [id, rollupPnl(months.map(month => month.entities[id]))]))
   const lanes = emptyLanes(config)
   for (const month of months) {
     for (const [key, lane] of Object.entries(month.customs.lanes)) {
@@ -1148,7 +1303,7 @@ export function summarizeTaxAndCustoms(config, months) {
   // A full year of actuals carries the statutory results. Tax then follows them.
   const stat = months.length === 12 ? months[11].stat ?? null : null
   return {
-    tax: taxFor(config, entities, stat),
+    tax: taxFor(config, months, stat),
     customs: { lanes, adjustments, adjustmentDuty, total: sum(months.map(month => month.customs.total)) },
   }
 }
@@ -1233,11 +1388,13 @@ function closeMonth(stock, config, month, shocks, priceTable, costScale, fees = 
   if (Object.values(financials.reconciliation).some(value => !Number.isFinite(value) || Math.abs(value) >= 0.005)) {
     throw new RangeError('This scenario does not reconcile to the cent. Reduce the size of the transfer price overrides or shocks.')
   }
-  return {
+  const closed = {
     month, shocks, entities, sales, capacity, royaltyBase, costScale, ...financials, services: { PL: poland, IN: india },
-    tax: taxFor(config, entities), customs: customsFor(config, book), ...(yearEnd ? { yearEnd, stat } : {}),
+    customs: customsFor(config, book), ...(yearEnd ? { yearEnd, stat } : {}),
     transactions: book.transactions, journal: book.journal,
   }
+  closed.tax = taxFor(config, [closed])
+  return closed
 }
 
 export function explainVariance(budget, actual) {
@@ -1459,9 +1616,12 @@ function summarizeEntityResults(actual, forecast, config) {
     const annual = rollupPnl(fullYear.map(results))
     const rate = taxRate(config, id)
     const taxable = stat?.[id]?.operatingProfit ?? annual.operatingProfit
+    // The US parent's tax follows its federal rules, not a flat rate.
     const row = {
       id, ytd, fullYear: annual, stat: stat?.[id] ?? null,
-      tax: { rate, ytd: rate * ytd.operatingProfit, fullYear: rate * taxable },
+      tax: id === 'US'
+        ? { rate, ytd: actual.length ? usIncomeTax(config, actual).total : 0, fullYear: usIncomeTax(config, fullYear, stat).total }
+        : { rate, ytd: rate * ytd.operatingProfit, fullYear: rate * taxable },
     }
     if (TESTED_PARTIES.includes(id)) {
       const service = isServiceProvider(id)
@@ -1838,6 +1998,8 @@ function entityLines(config, id, months, budgetServiceCost, index) {
       direction: paid ? 'paid' : 'earned', rate: config.policies.royaltyRate, base: paid ? paid.base : earned.cost, amount: (paid ?? earned).amount,
     } : null,
     service, made: id === 'US' || id === 'PL' ? made : null, received,
+    // The US parent's income tax for the period. Local statutory results exist only for a full year.
+    usTax: id === 'US' ? usIncomeTax(config, months, months.length === 12 ? months[11].stat ?? null : null) : null,
     inventory: months.length ? { opening: stockOf(months[0].inventory, id, 'opening', index), closing: stockOf(months.at(-1).inventory, id, 'closing', index) } : null,
   }
 }

@@ -10,6 +10,7 @@ import { MARKET_SHOCK_KEYS, SHOCK_KEYS } from './simulation.mjs';
 import { renderYearSummary } from './summary-view.mjs';
 import { renderEntityDetail } from './entity-view.mjs';
 import { licenseeLossWarning, readYearEndChoices, royaltyWarning } from './year-end-view.mjs';
+import { IN_THOUSANDS, realSize, thousands, unitCount, unitPrice as perUnit } from './format.mjs';
 
 // The year is shown by quarter. The model still closes every month underneath.
 const quarters = ['Q1', 'Q2', 'Q3', 'Q4'];
@@ -27,9 +28,10 @@ const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 // How long each quarter stays on screen while the year runs on its own.
 const RUN_STEP_MS = 750;
 const navButtons = [...document.querySelectorAll('[data-view]')];
-const formatAmount = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-const formatCompactAmount = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 2 });
-const formatNumber = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+// Amounts are in thousands of dollars and units in thousands. Headline figures show the real size.
+const formatAmount = thousands;
+const formatCompactAmount = realSize;
+const formatNumber = unitCount;
 const formatPercent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const formatDifference = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -217,7 +219,7 @@ function kpis(budget, actual) {
       const diff = value - base;
       return `<div class="panel kpi">
         <p class="kpi-label">${label}</p>
-        <strong class="kpi-number" title="${amount(value, isMargin ? formatPercent : formatAmount)}">${amount(value, display)}</strong>
+        <strong class="kpi-number" title="${isMargin ? amount(value, formatPercent) : `${amount(value)} thousand`}">${amount(value, display)}</strong>
         <p class="kpi-footer">${actual
           ? `<strong class="${varianceClass(diff)}">${isMargin ? signedPoints(diff) : signed(diff, formatCompactAmount)}</strong> vs ${amount(base, display)} budget`
           : 'Budget'} · ${quarters[state.period]}</p>
@@ -262,7 +264,7 @@ function chart() {
           ${budget.map((quarter, index) => {
             const base = quarter.consolidated[metric];
             const realized = index < state.revealed ? actual[index].consolidated[metric] : null;
-            const label = `${quarterNames[index]} budget ${amount(base)}${realized === null ? '' : `, actual ${amount(realized)}`}`;
+            const label = `${quarterNames[index]} budget ${amount(base, formatCompactAmount)}${realized === null ? '' : `, actual ${amount(realized, formatCompactAmount)}`}`;
             return `<button type="button" class="bar-group" aria-pressed="${index === state.period}" data-period="${index}" aria-label="${label}" title="${label}">
               ${bar(base, realized === null ? '' : 'paired')}${realized === null ? '' : bar(realized, 'actual')}
             </button>`;
@@ -276,7 +278,7 @@ function chart() {
 
 function annualTable() {
   return `<section class="panel" aria-labelledby="annual-heading">
-    <div class="panel-header"><div><h2 id="annual-heading">Budget and actuals by quarter</h2><p class="subtitle">Consolidated · USD</p></div></div>
+    <div class="panel-header"><div><h2 id="annual-heading">Budget and actuals by quarter</h2><p class="subtitle">Consolidated · ${IN_THOUSANDS}</p></div></div>
     <div class="table-scroll">
       <table>
         <thead><tr><th scope="col">Quarter</th><th scope="col">Budget sales</th><th scope="col">Actual sales</th><th scope="col">Budget profit</th><th scope="col">Actual profit</th><th scope="col">Profit variance</th><th scope="col">Budget margin</th><th scope="col">Actual margin</th></tr></thead>
@@ -315,9 +317,9 @@ function variancePanel(bridge) {
     check: 'Unexplained difference',
   };
   return `<section class="panel breakdown" aria-labelledby="bridge-heading">
-    <div class="panel-header"><div><h2 id="bridge-heading">Variance bridge</h2><p class="subtitle">${quarters[state.period]} · actual vs budget</p></div></div>
+    <div class="panel-header"><div><h2 id="bridge-heading">Variance bridge</h2><p class="subtitle">${quarters[state.period]} · actual vs budget · ${IN_THOUSANDS}</p></div></div>
     ${bridge ? metricList(Object.entries(labels).filter(([key]) => Number.isFinite(bridge[key])).map(([key, label]) => [
-      label, key === 'operatingMargin' ? signedPoints(bridge[key]) : signed(bridge[key], key === 'check' ? formatDifference : formatAmount),
+      label, key === 'operatingMargin' ? signedPoints(bridge[key]) : signed(bridge[key], formatAmount),
     ])) : '<p class="empty-state">Reveal this quarter’s actuals to see its variance bridge.</p>'}
   </section>`;
 }
@@ -333,7 +335,7 @@ function entityPanel(budget, actual) {
     ['operatingMargin', 'Operating margin'],
   ];
   return `<section class="panel" aria-labelledby="entity-heading">
-    <div class="panel-header"><div><h2 id="entity-heading">Entity results</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD</p></div></div>
+    <div class="panel-header"><div><h2 id="entity-heading">Entity results</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · ${IN_THOUSANDS}</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="entity-heading"><table>
       <thead><tr><th scope="col">Entity</th>${labels.map(([, label]) => `<th scope="col">${html(label)}</th>`).join('')}</tr></thead>
       <tbody>${[['Consolidated', pnl.consolidated], ...Object.entries(pnl.entities)].map(([id, row]) => `
@@ -361,7 +363,7 @@ function servicePanel(budget, actual) {
     const planned = budget.services[id].cost;
     const [target, range] = policy[id];
     const units = id === 'PL'
-      ? ` · ${amount(month.capacity.PL.used, formatNumber)} units converted${actual ? `, budget ${amount(budget.capacity.PL.used, formatNumber)}` : ''}` : '';
+      ? ` · ${amount(month.capacity.PL.used, formatNumber)} thousand units converted${actual ? `, budget ${amount(budget.capacity.PL.used, formatNumber)} thousand` : ''}` : '';
     return `<tr>
       <th scope="row" class="table-name">${html(labelFor(id))}<small class="pricing-margin-target">${serviceRoles[id]}${units}</small></th>
       <td>${amount(cost)}${actual ? `<small class="pricing-margin-target ${varianceClass(planned - cost)}">${signed(cost - planned)} vs budget</small>` : ''}</td>
@@ -372,7 +374,7 @@ function servicePanel(budget, actual) {
     </tr>`;
   };
   return `<section class="panel" aria-labelledby="service-heading">
-    <div class="panel-header"><div><h2 id="service-heading">Service fees and costs</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD · a fixed quarterly fee against a cost that moves</p></div></div>
+    <div class="panel-header"><div><h2 id="service-heading">Service fees and costs</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · ${IN_THOUSANDS} · a fixed quarterly fee against a cost that moves</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="service-heading"><table class="service-table">
       <thead><tr><th scope="col">Service provider</th><th scope="col">Cost</th><th scope="col">Budget cost</th><th scope="col">Fixed fee</th><th scope="col">Markup on cost</th><th scope="col">Policy markup</th></tr></thead>
       <tbody>${row('PL')}${row('IN')}</tbody>
@@ -389,7 +391,7 @@ function statPanel() {
   if (state.revealed < QUARTER_COUNT || !stat) return '';
   const tested = new Map(yearEnd.map(entry => [entry.id, entry]));
   return `<section class="panel" aria-labelledby="stat-heading">
-    <div class="panel-header"><div><h2 id="stat-heading">Local statutory results</h2><p class="subtitle">Full year 2027 · USD · operating profit on US GAAP and in the local statutory (stat) accounts</p></div></div>
+    <div class="panel-header"><div><h2 id="stat-heading">Local statutory results</h2><p class="subtitle">Full year 2027 · ${IN_THOUSANDS} · operating profit on US GAAP and in the local statutory (stat) accounts</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="stat-heading"><table class="stat-table">
       <thead><tr><th scope="col">Entity</th><th scope="col">US GAAP profit</th><th scope="col">Operating expenses</th>
         <th scope="col">Stat adjustment</th><th scope="col">Local stat profit</th><th scope="col">Tested result</th><th scope="col">Range</th><th scope="col">Result</th></tr></thead>
@@ -424,12 +426,12 @@ function productLinePanel(budget, actual) {
     <td class="table-name">${html(name)}${made ? `<small class="pricing-margin-target">Made in ${html(made)}</small>` : ''}</td><td>${amount(line.units, formatNumber)}</td><td>${amount(line.revenue)}</td>
     <td>${amount(line.cogs)}</td><td>${amount(line.revenue - line.cogs)}</td>
     <td>${amount(line.revenue ? (line.revenue - line.cogs) / line.revenue : 0, formatPercent)}</td>
-    <td class="${line.unfilled ? 'negative' : ''}">${amount(line.unfilled, formatNumber)}${line.unfilled ? `<small class="pricing-margin-target">${amount(line.lostSales)} of sales lost</small>` : ''}</td>
+    <td class="${line.unfilled ? 'negative' : ''}">${amount(line.unfilled, formatNumber)}${line.unfilled ? `<small class="pricing-margin-target">${amount(line.lostSales, formatCompactAmount)} of sales lost</small>` : ''}</td>
   </tr>`;
   return `<section class="panel" aria-labelledby="product-heading">
-    <div class="panel-header"><div><h2 id="product-heading">Product lines</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · third-party sales at group cost · USD</p></div></div>
+    <div class="panel-header"><div><h2 id="product-heading">Product lines</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · third-party sales at group cost · ${IN_THOUSANDS} · units in thousands</p></div></div>
     <div class="table-scroll" tabindex="0" role="region" aria-labelledby="product-heading"><table>
-      <thead><tr><th scope="col">Product family</th><th scope="col">Units sold</th><th scope="col">Net sales</th><th scope="col">Cost of goods sold</th><th scope="col">Gross profit</th><th scope="col">Gross margin</th><th scope="col">Demand not met, units</th></tr></thead>
+      <thead><tr><th scope="col">Product family</th><th scope="col">Units sold, thousands</th><th scope="col">Net sales</th><th scope="col">Cost of goods sold</th><th scope="col">Gross profit</th><th scope="col">Gross margin</th><th scope="col">Demand not met, thousand units</th></tr></thead>
       <tbody>${lines.map((line) => row(productFor(line.product), line, '', madeIn(line.product))).join('')}${row('All product lines', total, 'total-row')}</tbody>
     </table></div>
     <p class="field-note panel-note">A line made in one plant reaches the other region through the United States and Switzerland selling to each other. Demand goes unmet when a plant is at its limit for a line and neither of them has stock of it left.</p>
@@ -464,9 +466,9 @@ function customsPanel(customs, basis) {
 
 function taxPanel(budget, actual) {
   const { tax, customs } = summarizeTaxAndCustoms(state.config, [actual ?? budget]);
-  const basis = `${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · USD`;
+  const basis = `${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · ${IN_THOUSANDS}`;
   return `<section class="panel" aria-labelledby="tax-heading">
-      <div class="panel-header"><div><h2 id="tax-heading">Income tax</h2><p class="subtitle">${basis} · each entity’s rate applied to its operating profit</p></div></div>
+      <div class="panel-header"><div><h2 id="tax-heading">Income tax</h2><p class="subtitle">${basis} · each entity’s rate applied to its operating profit · the United States under its federal rules</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="tax-heading"><table>
         <thead><tr><th scope="col">Entity</th><th scope="col">Operating profit</th><th scope="col">Tax rate</th><th scope="col">Income tax</th></tr></thead>
         <tbody>${TAXED_ENTITIES.map((id) => `<tr>
@@ -476,6 +478,7 @@ function taxPanel(budget, actual) {
         <tr class="total-row"><td class="table-name">All entities</td><td>${amount(tax.profit)}</td><td>${amount(tax.effectiveRate, formatPercent)}</td><td>${amount(tax.total)}</td></tr>
         </tbody>
       </table></div>
+      <p class="field-note panel-note">The United States pays federal tax at 21% with the deduction for foreign-derived deduction eligible income (FDDEI), tax on net CFC tested income (NCTI) less a 90% credit for the foreign taxes on it, and the base erosion and anti-abuse tax (BEAT), plus state tax. Its rate is the effective rate on its operating profit. <a href="#entities">Entity detail</a> for the United States shows the working.</p>
     </section>
     ${customsPanel(customs, basis)}`;
 }
@@ -491,17 +494,17 @@ function controlPanels(budget, actual) {
   // The limits are set by the month in Scenario settings. A quarter can make three months of each.
   const capacityRows = Object.entries(capacity).flatMap(([id, entry]) => Object.entries(entry.limits).map(([family, limit]) => [
     `${labelFor(id)} · ${productFor(family)}`,
-    `${amount(entry.byProduct[family], formatNumber)} of ${amount(limit, formatNumber)} units · ${amount(state.config.capacity[id][family], formatNumber)} a month`,
+    `${amount(entry.byProduct[family], formatNumber)} of ${amount(limit, formatNumber)} thousand units · ${amount(state.config.capacity[id][family], formatNumber)} thousand a month`,
   ]));
   return `<div class="detail-stack">
     <section class="panel breakdown" aria-labelledby="capacity-heading">
       <div class="panel-header"><h2 id="capacity-heading">Production capacity</h2></div>${metricList(capacityRows)}
     </section>
     <section class="panel breakdown" aria-labelledby="reconcile-heading">
-      <div class="panel-header"><div><h2 id="reconcile-heading">Reconciliation</h2><p class="subtitle">Control differences · USD</p></div></div>
+      <div class="panel-header"><div><h2 id="reconcile-heading">Reconciliation</h2><p class="subtitle">Control differences · ${IN_THOUSANDS}</p></div></div>
       ${metricList(Object.entries(reconciliationNames).filter(([key]) => Number.isFinite(reconciliation[key])).map(([key, label]) => [
         // Rounding first keeps a difference of a fraction of a cent from showing as -0.00.
-        label, amount(Math.round(reconciliation[key] * 100) / 100 || 0, formatDifference),
+        label, amount(reconciliation[key], formatAmount),
       ]))}
     </section>
   </div>`;
@@ -518,7 +521,7 @@ function unmetDemandBanner(quarter) {
   const parts = [...lost].map(([product, line]) => {
     const plants = PRODUCT_PLANTS[product];
     const why = plants.length === 1 ? `made only in ${plantNames[plants[0]]}` : 'both plants at their limit';
-    return `${amount(line.units, formatNumber)} units of ${html(productFor(product))} (${why}), ${amount(line.lostSales)} of sales`;
+    return `${amount(line.units, formatNumber)} thousand units of ${html(productFor(product))} (${why}), ${amount(line.lostSales, formatCompactAmount)} of sales`;
   });
   return `<p class="alert-banner" role="note"><strong>Demand not met.</strong> In ${quarters[state.period]} the group could not supply ${parts.join('; ')}. The plant was at its limit for the line and no stock of it was left. See Production capacity below, or raise the limit in <a href="#settings">Scenario settings</a> for a new year.</p>`;
 }
@@ -578,7 +581,7 @@ function inventoryPanel(budget, actual) {
   const units = (lots) => amount(lots.reduce((total, lot) => total + lot.quantity, 0), formatNumber);
   const value = (lots) => amount(lots.reduce((total, lot) => total + lot.quantity * lot.unitValue, 0));
   return `<section class="panel" aria-labelledby="inventory-heading">
-    <div class="panel-header"><div><h2 id="inventory-heading">FIFO inventory roll-forward</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · units and local carrying value in USD</p></div></div>
+    <div class="panel-header"><div><h2 id="inventory-heading">FIFO inventory roll-forward</h2><p class="subtitle">${quarters[state.period]} · ${actual ? 'Actual' : 'Budget'} · units in thousands and local carrying value in ${IN_THOUSANDS}</p></div></div>
     <div class="table-scroll"><table>
       <thead><tr><th scope="col">Owner</th><th scope="col">Custodian</th><th scope="col">Product family</th><th scope="col">Stage</th><th scope="col">Opening</th><th scope="col">Receipts</th><th scope="col">Issues</th><th scope="col">Closing</th><th scope="col">Closing value</th></tr></thead>
       <tbody>${inventory.map((bin) => `<tr>
@@ -757,10 +760,11 @@ function mapTransactions({ forMap = false, entity = state.mapEntity } = {}) {
 function mapTable(transactions) {
   if (!transactions.length) return '<p class="empty-state">There are no matching transactions for this quarter.</p>';
   return `<div class="table-scroll"><table aria-label="Transaction ledger">
-    <thead><tr><th scope="col">Transaction</th><th scope="col">From → to</th><th scope="col">Product family</th><th scope="col">Goods route</th><th scope="col">Units</th><th scope="col">USD per unit</th><th scope="col">Amount</th></tr></thead>
+    <thead><tr><th scope="col">Transaction</th><th scope="col">From → to</th><th scope="col">Product family</th><th scope="col">Goods route</th><th scope="col">Units, thousands</th><th scope="col">USD per unit</th><th scope="col">Amount, ${IN_THOUSANDS}</th></tr></thead>
     <tbody>${transactions.map((transaction) => {
       const { from, to, category, policy, product, quantity, amount: total, external } = transaction;
-      const unitPrice = category === 'goods' && quantity && !external ? amount(total / quantity) : '—';
+      // Thousands of dollars over thousands of units is dollars per unit.
+      const unitPrice = category === 'goods' && quantity && !external ? amount(total / quantity, perUnit) : '—';
       return `<tr>
         <td><span class="legend-item"><i class="swatch ${html(category)}"></i></span> <span class="table-name">${html(POLICY_LABELS[policy] ?? policy)}</span></td>
         <td>${html(mapLabel(from))} → ${html(mapLabel(to))}</td>
@@ -819,7 +823,7 @@ function renderMap() {
     </section>
     <section class="panel" aria-labelledby="flows-heading">
       <div class="panel-header">
-        <div><h2 id="flows-heading">${state.mapEntity ? html(mapLabel(state.mapEntity)) : 'Transaction ledger'}</h2><p class="subtitle">${quarters[state.period]} · ${state.mapBasis === 'budget' ? 'Budget' : 'Actual'} · ${transactions.length} ${transactions.length === 1 ? 'transaction' : 'transactions'} · USD</p></div>
+        <div><h2 id="flows-heading">${state.mapEntity ? html(mapLabel(state.mapEntity)) : 'Transaction ledger'}</h2><p class="subtitle">${quarters[state.period]} · ${state.mapBasis === 'budget' ? 'Budget' : 'Actual'} · ${transactions.length} ${transactions.length === 1 ? 'transaction' : 'transactions'} · ${IN_THOUSANDS}</p></div>
         ${state.mapEntity ? '<button type="button" class="button" data-action="clear-map-entity">Clear entity filter</button>' : ''}
       </div>
       ${mapTable(transactions)}
@@ -942,7 +946,7 @@ function renderSettings() {
         </div>
         <div class="detail-stack">
           <section class="panel" aria-labelledby="production-heading">
-            <div class="panel-header"><div><h2 id="production-heading">Production capacity</h2><p class="subtitle">Maximum units per month for each product line a plant makes. A quarter can make three times this</p></div></div>
+            <div class="panel-header"><div><h2 id="production-heading">Production capacity</h2><p class="subtitle">Maximum units per month, in thousands, for each product line a plant makes. A quarter can make three times this</p></div></div>
             <div class="form-fields">
               ${Object.entries(capacity).map(([id, limits]) => `<div class="field-pair">${Object.entries(limits).map(([family, limit]) =>
                 `<label class="field">${html(labelFor(id))} · ${html(productFor(family))}${numberInput(`capacity.${id}.${family}`, limit, { min: 0, step: 1 })}</label>`).join('')}</div>`).join('')}
@@ -1006,9 +1010,9 @@ function renderSettings() {
         <div class="panel-header"><div><h2 id="tax-settings-heading">Income tax</h2><p class="subtitle">Illustrative rates, as percentages</p></div></div>
         <div class="form-fields">
           <div class="rate-fields">
-            ${TAXED_ENTITIES.map((id) => `<label class="field">${html(labelFor(id))} income tax${numberInput(`tax.${id}`, percentInput(tax.rates[id]), { min: 0, max: 99 })}</label>`).join('')}
+            ${TAXED_ENTITIES.map((id) => `<label class="field">${html(labelFor(id))} income tax${id === 'US' ? ', federal 21% plus state' : ''}${numberInput(`tax.${id}`, percentInput(tax.rates[id]), { min: 0, max: 99 })}</label>`).join('')}
           </div>
-          <p class="field-note">Income tax is each entity’s rate applied to its operating profit, and to its local statutory profit once the year is closed.</p>
+          <p class="field-note">Income tax is each entity’s rate applied to its operating profit, and to its local statutory profit once the year is closed. The United States is different: it pays federal tax at 21% with FDDEI, NCTI and BEAT, and state tax at the rest of its rate. BEAT applies while the US parent’s gross receipts are at least $500 million a year.</p>
         </div>
       </section>
       <section class="panel" aria-labelledby="customs-settings-heading">

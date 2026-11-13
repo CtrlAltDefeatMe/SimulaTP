@@ -1,7 +1,9 @@
 import { ENTITIES } from './engine.mjs';
+import { IN_THOUSANDS, realSize, thousands } from './format.mjs';
 
-const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-const wholeDollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+// Amounts in tables and forms are in thousands of dollars. Headline figures and prose show the real size.
+const dollars = thousands;
+const headline = realSize;
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const share = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 1 });
 const statusLabels = { within: 'Within range', below: 'Below range', above: 'Above range' };
@@ -25,7 +27,7 @@ const rateToTenth = new Intl.NumberFormat('en-US', { style: 'percent', minimumFr
  * `closed` is true once all four quarters are actuals and nothing is left to project.
  */
 export function licenseeLossWarning({ royaltyRate, swiss, swissBeforeRoyalty, breakEvenRate, closed = false }) {
-  const loss = wholeDollars.format(Math.abs(swiss));
+  const loss = headline.format(Math.abs(swiss));
   const result = closed ? 'made' : 'is projected to make';
   if (swissBeforeRoyalty <= 0 || !Number.isFinite(breakEvenRate)) {
     return `Switzerland, the licensee, ${result} a full-year operating loss of ${loss}. It ${closed ? 'was' : 'is'} in a loss before any royalty.`;
@@ -38,7 +40,7 @@ function entityName(id) {
 }
 
 function signedDollars(value) {
-  if (!value) return dollars.format(0);
+  if (Math.abs(value) < 0.5) return dollars.format(0);
   return `${value > 0 ? '+' : '−'}${dollars.format(Math.abs(value))}`;
 }
 
@@ -78,12 +80,12 @@ function scorecard({ yearEnd, entityResults, fullYear, budget, priceRevisions })
     </div>
     <div class="kpi-grid year-end-stats">
       ${stat('Tested entities within range', `${within} of ${yearEnd.length}`, 'Local statutory results, after year-end adjustments')}
-      ${stat('Tax at risk', wholeDollars.format(exposure), 'Assumed adjustment to target with no relief')}
+      ${stat('Tax at risk', headline.format(exposure), 'Assumed adjustment to target with no relief')}
       ${stat('Price reviews used', `${priceRevisions} of 3`, 'Quarterly reviews where prices or fees changed')}
-      ${stat('Year-end adjustments', wholeDollars.format(moved), `${adjusted.length} of ${yearEnd.length} tested entities`)}
-      ${stat('Group income tax', wholeDollars.format(fullYear.tax.total), `${percent.format(fullYear.tax.effectiveRate)} effective rate on local results · budget ${percent.format(budget.tax.effectiveRate)}`)}
-      ${stat('Customs duty', wholeDollars.format(fullYear.customs.total), `Charged on imports and carried into cost of sales · ${wholeDollars.format(adjustmentDuty)} on year-end adjustments`)}
-      ${stat('Consolidated operating profit', wholeDollars.format(consolidated.operatingProfit), `${profitGap < 0 ? '−' : '+'}${wholeDollars.format(Math.abs(profitGap))} vs budget`)}
+      ${stat('Year-end adjustments', headline.format(moved), `${adjusted.length} of ${yearEnd.length} tested entities`)}
+      ${stat('Group income tax', headline.format(fullYear.tax.total), `${percent.format(fullYear.tax.effectiveRate)} effective rate on local results · budget ${percent.format(budget.tax.effectiveRate)}`)}
+      ${stat('Customs duty', headline.format(fullYear.customs.total), `Charged on imports and carried into cost of sales · ${headline.format(adjustmentDuty)} on year-end adjustments`)}
+      ${stat('Consolidated operating profit', headline.format(consolidated.operatingProfit), `${profitGap < 0 ? '−' : '+'}${headline.format(Math.abs(profitGap))} vs budget`)}
       ${stat('Consolidated operating margin', percent.format(consolidated.operatingMargin), `Budget ${percent.format(budget.operatingMargin)}`)}
     </div>
   </section>`;
@@ -111,7 +113,7 @@ function adjustmentForm({ yearEnd, message }) {
   return `<form id="year-end-form" class="pricing-form">
     <section class="panel" aria-labelledby="year-end-adjust-heading">
       <div class="panel-header"><div><h2 id="year-end-adjust-heading">Year-end adjustments</h2>
-        <p class="subtitle" id="year-end-help">The range is tested on the local statutory (stat) result: US GAAP with the stat adjustment revealed at the fourth-quarter close. A positive stat adjustment is extra local cost. For a distributor, a positive amount is paid to its supplier and a negative amount is a credit from it. For Poland and India, a positive amount is an extra fee from their customers and a negative amount is a refund. Adjustments are booked in the fourth quarter. They do not change consolidated profit, except that an increase paid by Asia or Canada attracts customs duty, which the distributor bears. A credit earns no duty refund.</p></div></div>
+        <p class="subtitle" id="year-end-help">Amounts in ${IN_THOUSANDS}. The range is tested on the local statutory (stat) result: US GAAP with the stat adjustment revealed at the fourth-quarter close. A positive stat adjustment is extra local cost. For a distributor, a positive amount is paid to its supplier and a negative amount is a credit from it. For Poland and India, a positive amount is an extra fee from their customers and a negative amount is a refund. Adjustments are booked in the fourth quarter. They do not change consolidated profit, except that an increase paid by Asia or Canada attracts customs duty, which the distributor bears. A credit earns no duty refund.</p></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-labelledby="year-end-adjust-heading"><table class="year-end-table">
         <thead><tr>
           <th scope="col">Entity</th><th scope="col">Counterparty</th><th scope="col">US GAAP result</th><th scope="col">Stat adjustment</th>
@@ -143,9 +145,9 @@ function adjustmentForm({ yearEnd, message }) {
 export function allocationPanel({ allocation, fullYear, revealed, royalty }) {
   const flagged = royalty?.belowResearch;
   const basis = revealed >= 12 ? 'Full-year actuals' : revealed ? 'Full-year forecast at current prices' : 'Full-year budget';
-  const part = (label, value, note, alert = false) => `<li${alert ? ' class="flagged"' : ''}><span>${html(label)}${note ? `<small>${html(note)}</small>` : ''}</span><strong>${wholeDollars.format(value)} · ${share.format(allocation.total ? value / allocation.total : 0)}</strong></li>`;
+  const part = (label, value, note, alert = false) => `<li${alert ? ' class="flagged"' : ''}><span>${html(label)}${note ? `<small>${html(note)}</small>` : ''}</span><strong>${dollars.format(value)} · ${share.format(allocation.total ? value / allocation.total : 0)}</strong></li>`;
   return `<section class="panel breakdown" aria-labelledby="allocation-heading">
-    <div class="panel-header"><div><h2 id="allocation-heading">Where the profit lands</h2><p class="subtitle">${basis} · sum of entity operating profit</p></div></div>
+    <div class="panel-header"><div><h2 id="allocation-heading">Where the profit lands</h2><p class="subtitle">${basis} · sum of entity operating profit · ${IN_THOUSANDS}</p></div></div>
     <div class="allocation-grid">
       <ul class="detail-list">
         ${part('United States', allocation.us, 'IP owner, manufacturer and headquarters')}
@@ -153,10 +155,10 @@ export function allocationPanel({ allocation, fullYear, revealed, royalty }) {
         ${part('All other entities', allocation.routine, 'Routine returns')}
       </ul>
       <ul class="detail-list">
-        <li${flagged ? ' class="flagged"' : ''}><span>Royalty paid to the United States${royalty ? `<small>${rate.format(royalty.royaltyRate)} royalty · R&amp;D ${rate.format(royalty.researchRate)} of consolidated sales</small>` : ''}</span><strong>${wholeDollars.format(allocation.royalty)}</strong></li>
+        <li${flagged ? ' class="flagged"' : ''}><span>Royalty paid to the United States${royalty ? `<small>${rate.format(royalty.royaltyRate)} royalty · R&amp;D ${rate.format(royalty.researchRate)} of consolidated sales</small>` : ''}</span><strong>${dollars.format(allocation.royalty)}</strong></li>
         <li><span>Royalty as a share of Swiss profit before royalty</span><strong>${share.format(allocation.royaltyShare)}</strong></li>
-        <li><span>Group income tax<small>${percent.format(fullYear.tax.effectiveRate)} effective rate on entity profit</small></span><strong>${wholeDollars.format(fullYear.tax.total)}</strong></li>
-        <li><span>Customs duty charged on imports<small>Part of the importers’ cost of sales as the goods are sold</small></span><strong>${wholeDollars.format(fullYear.customs.total)}</strong></li>
+        <li><span>Group income tax<small>${percent.format(fullYear.tax.effectiveRate)} effective rate on entity profit</small></span><strong>${dollars.format(fullYear.tax.total)}</strong></li>
+        <li><span>Customs duty charged on imports<small>Part of the importers’ cost of sales as the goods are sold</small></span><strong>${dollars.format(fullYear.customs.total)}</strong></li>
       </ul>
     </div>
     ${flagged ? `<p class="field-warning panel-note">${html(royaltyWarning(royalty))}</p>` : ''}
