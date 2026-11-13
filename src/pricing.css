@@ -51,15 +51,23 @@ ul.pricing-assumptions-note { margin: 0; padding-left: 20px; }
 .pricing-table thead th:nth-child(-n + 3), .pricing-table .pricing-policy { text-align: left; }
 .pricing-table tbody + tbody tr:first-child > * { border-top: 1px solid var(--border); }
 .pricing-table .pricing-channel, .pricing-table .pricing-policy { vertical-align: top; }
+/* The channel and product names may wrap onto two lines, which leaves the room to the price being typed. */
 .pricing-table .pricing-channel {
-  width: 24%;
+  width: 13%;
+  min-width: 104px;
   background: #f6f8fb;
   color: var(--navy);
   white-space: normal;
 }
+.pricing-table thead th:first-child, .pricing-table thead th:nth-child(3) { white-space: normal; }
 .pricing-table .pricing-policy { color: var(--secondary); }
-.pricing-table .pricing-family { background: transparent; color: var(--text); font-weight: 550; text-align: left; }
-.pricing-table .pricing-edit { width: 110px; }
+.pricing-table .pricing-family { width: 11%; min-width: 96px; background: transparent; color: var(--text); font-weight: 550; text-align: left; white-space: normal; }
+.pricing-table .pricing-edit { width: 146px; }
+/* Wide enough to show a full price or monthly fee beside the browser's stepper arrows. */
+.pricing-table .price-input { min-width: 122px; }
+/* The fee table's headings wrap so the new fee keeps its width on a narrow screen. */
+.service-fee-table thead th { white-space: normal; }
+.service-fee-table th, .service-fee-table td { padding-right: 9px; padding-left: 9px; }
 .pricing-table tbody:last-child tr:last-child > * { border-bottom: 0; }
 .pricing-table td { font-variant-numeric: tabular-nums; }
 .pricing-quote {
