@@ -361,8 +361,12 @@ function serviceFeesForMonth(config, month, initial) {
 }
 
 // `origin` is the customs block where the goods were made. It travels with the lot.
-function makeLot(quantity, unitValue, unitGroupCost, unitMaterialCost, vintage, origin) {
-  return { quantity, unitValue, unitGroupCost, unitMaterialCost, vintage, origin }
+// `source` is how the lot came into its bin: 'made', 'converted', 'bought' or 'materials'.
+// `trace` can add: `unitDuty`, the customs duty inside `unitValue`; `declared`, the origin
+// declared at customs when the lot crossed a customs border; and `materials`, the month the
+// materials of a converted lot were bought.
+function makeLot(quantity, unitValue, unitGroupCost, unitMaterialCost, vintage, origin, source = 'bought', trace = {}) {
+  return { quantity, unitValue, unitGroupCost, unitMaterialCost, vintage, origin, source, unitDuty: 0, declared: null, materials: null, ...trace }
 }
 
 class Stock {
@@ -497,9 +501,10 @@ function seedOpeningStock(costScale, config) {
       const rate = importDutyRate(config, sourceOf(market), market, family, origin)
       // The duty inside a landed cost.
       const duty = landed => landed * rate / (1 + rate)
+      const declared = customsBlock(market) !== origin ? origin : null
       bin.lots = [
-        makeLot(product.demand[market], tp * 0.97, cost * 0.98 + duty(tp * 0.97), product.material * costScale * 0.98, '2026-11', origin),
-        makeLot(product.demand[market], tp, cost + duty(tp), product.material * costScale, '2026-12', origin),
+        makeLot(product.demand[market], tp * 0.97, cost * 0.98 + duty(tp * 0.97), product.material * costScale * 0.98, '2026-11', origin, 'bought', { unitDuty: duty(tp * 0.97), declared }),
+        makeLot(product.demand[market], tp, cost + duty(tp), product.material * costScale, '2026-12', origin, 'bought', { unitDuty: duty(tp), declared }),
       ]
     }
     const swissDemand = sum(MARKETS.filter(id => id !== 'US' && id !== 'CA').map(id => product.demand[id]))
@@ -507,14 +512,14 @@ function seedOpeningStock(costScale, config) {
     const local = cost + product.plConversion * costScale * historical.polandMarkup
     const warehouse = stock.bin('CH', 'BE', family)
     warehouse.lots = [0.96, 0.98, 0.99, 1].map((factor, index) =>
-      makeLot(swissDemand, local * factor, cost * factor, product.material * costScale * factor, '2026-' + String(9 + index).padStart(2, '0'), 'EU'))
+      makeLot(swissDemand, local * factor, cost * factor, product.material * costScale * factor, '2026-' + String(9 + index).padStart(2, '0'), 'EU', 'converted'))
     const us = stock.bin('US', 'US', family)
     const usCost = baseGroupCost(product, 'US') * costScale
-    us.lots = [makeLot(product.demand.US + product.demand.CA, usCost, usCost, product.material * costScale, '2026-12', 'US')]
+    us.lots = [makeLot(product.demand.US + product.demand.CA, usCost, usCost, product.material * costScale, '2026-12', 'US', 'made')]
     for (const [stage, months] of [['raw', 0.35], ['wip', 0.15]]) {
       const bin = stock.bin('CH', 'PL', family, stage)
       const material = product.material * costScale
-      bin.lots = [makeLot(Math.round(swissDemand * months), material, material, material, '2026-12', 'EU')]
+      bin.lots = [makeLot(Math.round(swissDemand * months), material, material, material, '2026-12', 'EU', 'materials')]
     }
   }
   return stock
@@ -631,7 +636,7 @@ function produceInUs(stock, book, family, plan, usUnits, shocks, vintage, costSc
   const product = PRODUCTS[family]
   const material = product.material * costScale * (1 + shocks.materialCost)
   const cost = material + product.usConversion * costScale
-  stock.receive(plan.us, [makeLot(usUnits, cost, cost, material, vintage, 'US')])
+  stock.receive(plan.us, [makeLot(usUnits, cost, cost, material, vintage, 'US', 'made')])
   book.post('US', 'inventory', 'externalClearing', usUnits * cost)
 }
 
@@ -671,7 +676,7 @@ function tollInPoland(stock, book, plans, plUnits, shocks, config, vintage, cost
     const raw = stock.bin('CH', 'PL', family, 'raw')
     const wip = stock.bin('CH', 'PL', family, 'wip')
     // Replenish the raw and material-only WIP buffers as conversion completes.
-    stock.receive(raw, [makeLot(units, material, material, material, vintage, 'EU')])
+    stock.receive(raw, [makeLot(units, material, material, material, vintage, 'EU', 'materials')])
     book.post('CH', 'inventory', 'externalClearing', units * material)
     stock.receive(wip, stock.issue(raw, units))
     const completed = stock.issue(wip, units)
@@ -683,6 +688,8 @@ function tollInPoland(stock, book, plans, plUnits, shocks, config, vintage, cost
     })
     stock.receive(plan.warehouse, completed.map(lot => makeLot(
       lot.quantity, lot.unitValue + charge * share / units, lot.unitGroupCost + cost * share / units, lot.unitMaterialCost, vintage, lot.origin,
+      // The lot in conversion still carries the month its materials were bought.
+      'converted', { materials: lot.vintage },
     )))
   })
   return result
@@ -709,7 +716,10 @@ function deliver(stock, book, config, { lots, from, to, target, family, policy, 
     }
     // The importer pays the duty on top of the price. It is part of what the goods cost,
     // for the importer and for the group, and reaches cost of sales when they are sold.
-    return makeLot(lot.quantity, price * (1 + rate), lot.unitGroupCost + price * rate, lot.unitMaterialCost, vintage, lot.origin)
+    return makeLot(
+      lot.quantity, price * (1 + rate), lot.unitGroupCost + price * rate, lot.unitMaterialCost, vintage, lot.origin,
+      'bought', { unitDuty: price * rate, declared: importer !== customsBlock(from) ? lot.origin : null },
+    )
   })
   stock.receive(target, received)
   book.transfer({
@@ -1407,24 +1417,77 @@ function distributorQuote(config, route, forecast, fullYear, startMonth, current
 
 // Units and carrying value of one entity's stock, by stage and product. `key` picks the
 // opening or the closing lots of each bin.
-function stockOf(inventory, id, key) {
+// Whether where a product was made changes what it costs this entity to import it. Goods
+// made in the United States and in Poland reach the same importer at different duty rates.
+function originMatters(config, id, family) {
+  const supplier = id === 'US' ? 'CH' : id === 'CH' ? 'US' : sourceOf(id)
+  return importDutyRate(config, supplier, id, family, 'US') !== importDutyRate(config, supplier, id, family, 'EU')
+}
+
+// Lots that came into one bin in the same month, the same way and at one value are a layer.
+// Goods converted in one month from materials bought in different months are layers of
+// their own. The declared origin tells layers apart only where it changes the duty. Where
+// a month still brought in lots at more than one value, `n` numbers them in the order they
+// arrived. It is read from the whole year, so a layer keeps its number in every month.
+function layerIndex(config, months, id) {
+  const split = Object.fromEntries(FAMILIES.map(family => [family, originMatters(config, id, family)]))
+  const declared = (product, lot) => split[product] ? lot.declared : null
+  const values = new Map()
+  const rank = (stage, product, lot) => {
+    const key = [stage, product, lot.vintage, lot.source, declared(product, lot) ?? '', lot.materials ?? ''].join('/')
+    const seen = values.get(key) ?? []
+    values.set(key, seen)
+    const found = seen.findIndex(value => Math.abs(value - lot.unitValue) < 1e-9)
+    return found < 0 ? seen.push(lot.unitValue) - 1 : found
+  }
+  months.forEach((month, index) => {
+    for (const bin of month.inventory) {
+      if (bin.owner !== id) continue
+      for (const lot of index ? bin.receipts : [...bin.opening, ...bin.receipts]) rank(bin.stage, bin.product, lot)
+    }
+  })
+  return { rank, declared }
+}
+
+const SOURCE_ORDER = { made: 0, converted: 0, materials: 0, bought: 1 }
+
+// The layers a list of lots belongs to, oldest first: units, value and the customs duty inside the value.
+function layersOf(lots, stage, product, index) {
+  const layers = new Map()
+  for (const lot of lots) {
+    const n = index.rank(stage, product, lot)
+    const declared = index.declared(product, lot)
+    // The key sorts the layers of a bin into the order they are sold: by month, goods made or converted before goods bought.
+    const key = [lot.vintage, SOURCE_ORDER[lot.source], lot.source, declared ?? '', lot.materials ?? '', String(n).padStart(3, '0')].join('/')
+    const layer = layers.get(key) ?? { key, vintage: lot.vintage, source: lot.source, declared, materials: lot.materials, n, units: 0, amount: 0, duty: 0 }
+    layer.units += lot.quantity
+    layer.amount += lot.quantity * lot.unitValue
+    layer.duty += lot.quantity * lot.unitDuty
+    layers.set(key, layer)
+  }
+  return [...layers.values()].sort((left, right) => left.key.localeCompare(right.key))
+}
+
+function stockOf(inventory, id, key, index) {
   const rows = new Map()
   for (const bin of inventory) {
     if (bin.owner !== id) continue
     const name = bin.stage + '/' + bin.product
-    const row = rows.get(name) ?? { stage: bin.stage, product: bin.product, units: 0, amount: 0 }
+    const row = rows.get(name) ?? { stage: bin.stage, product: bin.product, units: 0, amount: 0, lots: [] }
     for (const lot of bin[key]) {
       row.units += lot.quantity
       row.amount += lot.quantity * lot.unitValue
+      row.lots.push(lot)
     }
     rows.set(name, row)
   }
   const order = { finished: 0, wip: 1, raw: 2 }
   return [...rows.values()].sort((left, right) => order[left.stage] - order[right.stage] || left.product.localeCompare(right.product))
+    .map(({ lots, ...row }) => ({ ...row, layers: layersOf(lots, row.stage, row.product, index) }))
 }
 
 // The line detail behind one entity's results for a set of closed months.
-function entityLines(config, id, months, budgetServiceCost) {
+function entityLines(config, id, months, budgetServiceCost, index) {
   const results = rollupPnl(months.map(month => month.entities[id]))
   const byProduct = () => Object.fromEntries(FAMILIES.map(family => [family, { units: 0, amount: 0 }]))
   const sales = new Map()
@@ -1433,6 +1496,7 @@ function entityLines(config, id, months, budgetServiceCost) {
   const costOfSales = byProduct()
   const received = byProduct()
   const made = byProduct()
+  const lots = { sold: Object.fromEntries(FAMILIES.map(family => [family, []])), received: Object.fromEntries(FAMILIES.map(family => [family, []])) }
   let adjustmentRevenue = 0
   let adjustmentCost = 0
   for (const month of months) {
@@ -1481,8 +1545,15 @@ function entityLines(config, id, months, budgetServiceCost) {
         received[bin.product].units += lot.quantity
         received[bin.product].amount += lot.quantity * lot.unitValue
       }
+      lots.sold[bin.product].push(...bin.issues)
+      lots.received[bin.product].push(...bin.receipts)
     }
     if (month.capacity[id]) for (const family of FAMILIES) made[family].units += month.capacity[id].byProduct[family]
+  }
+  // Each product line's cost of sales and receipts, layer by layer.
+  for (const family of FAMILIES) {
+    costOfSales[family].layers = layersOf(lots.sold[family], 'finished', family, index)
+    received[family].layers = layersOf(lots.received[family], 'finished', family, index)
   }
   const list = (lines, parties) => [...lines.values()].map(line => ({ ...line, [parties]: [...line[parties]] }))
   const chargeLines = list(charges, 'from')
@@ -1523,7 +1594,7 @@ function entityLines(config, id, months, budgetServiceCost) {
       direction: paid ? 'paid' : 'earned', rate: config.policies.royaltyRate, base: paid ? paid.base : earned.cost, amount: (paid ?? earned).amount,
     } : null,
     service, made: id === 'US' || id === 'PL' ? made : null, received,
-    inventory: months.length ? { opening: stockOf(months[0].inventory, id, 'opening'), closing: stockOf(months.at(-1).inventory, id, 'closing') } : null,
+    inventory: months.length ? { opening: stockOf(months[0].inventory, id, 'opening', index), closing: stockOf(months.at(-1).inventory, id, 'closing', index) } : null,
   }
 }
 
@@ -1533,6 +1604,8 @@ function entityLines(config, id, months, budgetServiceCost) {
  * month in `period`, or 'year' for the full-year budget beside actuals to date.
  * Actuals cover revealed months only and are zero before any is revealed. Stock is a
  * balance, not a flow: an end of the actual inventory that is not known yet is null.
+ * Cost of sales, receipts and stock each list their `layers`: the lots of one month at one
+ * value, first in, first out, with the customs duty inside the value.
  */
 export function entityDetail(config, { budget, actual }, id, { basis = 'month', period = 0, revealed = 0 } = {}) {
   validateConfig(config)
@@ -1541,18 +1614,22 @@ export function entityDetail(config, { budget, actual }, id, { basis = 'month', 
   if (!Number.isInteger(period) || period < 0 || period > 11) throw new RangeError('The month must be between January and December.')
   if (!Number.isInteger(revealed) || revealed < 0 || revealed > 12) throw new RangeError('Revealed months must be between 0 and 12.')
   const { budgetServiceCost } = scenarioBudget(config)
-  const lines = months => entityLines(config, id, months, budgetServiceCost)
+  const ranks = { budget: layerIndex(config, budget, id), actual: layerIndex(config, actual, id) }
   const actualMonths = basis === 'year' ? actual.slice(0, revealed) : period < revealed ? [actual[period]] : []
-  const actualLines = lines(actualMonths)
+  const actualLines = entityLines(config, id, actualMonths, budgetServiceCost, ranks.actual)
   if (!actualMonths.length) {
     // The year opens on the same stock in the budget and in the actuals.
-    const yearOpening = stockOf(budget[0].inventory, id, 'opening')
+    const yearOpening = stockOf(actual[0].inventory, id, 'opening', ranks.actual)
     if (basis === 'year') actualLines.inventory = { opening: yearOpening, closing: yearOpening }
     // The next month to be revealed starts from the stock the last revealed month ended on.
-    else if (period === revealed) actualLines.inventory = { opening: period ? stockOf(actual[period - 1].inventory, id, 'closing') : yearOpening, closing: null }
-    else actualLines.inventory = { opening: null, closing: null }
+    else if (period === revealed) {
+      actualLines.inventory = { opening: period ? stockOf(actual[period - 1].inventory, id, 'closing', ranks.actual) : yearOpening, closing: null }
+    } else actualLines.inventory = { opening: null, closing: null }
   }
-  return { id, basis, period, revealed, budget: lines(basis === 'year' ? budget : [budget[period]]), actual: actualLines }
+  return {
+    id, basis, period, revealed,
+    budget: entityLines(config, id, basis === 'year' ? budget : [budget[period]], budgetServiceCost, ranks.budget), actual: actualLines,
+  }
 }
 
 /**
