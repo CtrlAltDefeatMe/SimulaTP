@@ -4,6 +4,7 @@ const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'U
 const whole = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const rate = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 2 });
+const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const families = Object.keys(PRODUCTS);
 const stageNames = { wip: 'work in process', raw: 'raw materials' };
@@ -35,14 +36,34 @@ const money = value => `${value < -0.005 ? '−' : ''}${dollars.format(Math.abs(
 // One side of a row: units, a value per unit and an amount. A side with nothing to show yet is null.
 function cells(side, kind) {
   if (!side) return '<td>—</td><td>—</td><td>—</td>';
+  // A stock layer that one side does not hold is left empty on that side.
+  if (side.absent) return '<td></td><td></td><td></td>';
   if (kind === 'percent') return `<td></td><td></td><td>${Number.isFinite(side.amount) ? percent.format(side.amount) : '—'}</td>`;
   const units = side.units === undefined ? '' : whole.format(side.units);
   // A row of units alone, such as units produced, has no value per unit.
   const each = side.units === undefined || side.amount === undefined ? '' : side.units ? money(side.amount / side.units) : '—';
-  return `<td>${units}</td><td>${each}</td><td>${side.amount === undefined ? '' : money(side.amount)}</td>`;
+  // An imported layer is carried at its transfer price plus the customs duty paid on it.
+  const duty = side.duty > 0.005 && side.units
+    ? `<small class="entity-duty">${money((side.amount - side.duty) / side.units)} price + ${money(side.duty / side.units)} duty</small>` : '';
+  return `<td>${units}</td><td>${each}${duty}</td><td>${side.amount === undefined ? '' : money(side.amount)}</td>`;
 }
 
-function buildRows({ id, budget, actual }) {
+// What a stock layer is called: how and when the units came in.
+function layerLabel(id, stage, layer, showOrigin) {
+  const monthOf = vintage => `${shortMonths[Number(vintage.slice(5)) - 1]} ${vintage.slice(0, 4)}`;
+  const when = monthOf(layer.vintage);
+  const base = layer.source === 'made' ? `Made ${when}`
+    // Goods converted in one month can carry materials bought in two, at two prices.
+    : layer.source === 'converted' ? `Converted in Poland ${when}${layer.materials ? `, ${monthOf(layer.materials)} materials` : ''}`
+    : layer.source === 'materials' ? (stage === 'wip' ? `In conversion, materials bought ${when}` : `Materials bought ${when}`)
+    : id === 'US' ? `Bought from Switzerland ${when}`
+    : id === 'CH' ? `Bought from the United States ${when}`
+    : `Bought ${when}`;
+  const origin = showOrigin && layer.declared ? ` · made in ${layer.declared === 'US' ? 'the US' : 'Poland'}` : '';
+  return `${base}${origin}${layer.n ? ` · lot ${layer.n + 1}` : ''}`;
+}
+
+function buildRows({ id, budget, actual }, showLayers) {
   const rows = [];
   const sides = [budget, actual];
   const heading = text => rows.push({ type: 'heading', text });
@@ -56,6 +77,24 @@ function buildRows({ id, budget, actual }) {
   };
   const amount = pick => side => ({ amount: pick(side) });
   const sumOf = (list, pick) => list.reduce((total, item) => total + pick(item), 0);
+  // Where the units were made is named only when this entity holds goods of both origins at different duty.
+  const stockLines = side => [...Object.values(side.costOfSales.products), ...Object.values(side.received), ...(side.inventory?.opening ?? []), ...(side.inventory?.closing ?? [])];
+  const showOrigin = new Set(sides.flatMap(stockLines).flatMap(entry => entry.layers).map(layer => layer.declared).filter(Boolean)).size > 1;
+  // The layers under a stock line, oldest first. `pick` reads one side's line, or null when that side has nothing to show yet.
+  const layers = (stage, pick) => {
+    if (!showLayers) return;
+    const found = new Map(sides.flatMap(side => pick(side)?.layers ?? []).map(layer => [layer.key, layer]));
+    // A layer's key sorts it into the order the layers are sold, on both sides.
+    for (const key of [...found.keys()].sort()) {
+      rows.push({
+        type: 'layer', indent: true, label: layerLabel(id, stage, found.get(key), showOrigin),
+        ...Object.fromEntries(['budget', 'actual'].map((name, index) => {
+          const line = pick(sides[index]);
+          return [name, line ? line.layers.find(layer => layer.key === key) ?? { absent: true } : { absent: true }];
+        })),
+      });
+    }
+  };
 
   // Goods sold, buyer by buyer, because each buyer pays its own price.
   const buyers = [...new Map(sides.flatMap(side => side.sales).map(group => [group.buyer, group])).values()];
@@ -96,7 +135,10 @@ function buildRows({ id, budget, actual }) {
   // Cost of sales: the units that left finished stock, at the value they were carried at.
   if (buyers.length) {
     heading('Cost of sales');
-    for (const family of families) line(PRODUCTS[family].name, side => side.costOfSales.products[family], { keep: true });
+    for (const family of families) {
+      line(PRODUCTS[family].name, side => side.costOfSales.products[family], { keep: true });
+      layers('finished', side => side.costOfSales.products[family]);
+    }
     line('Year-end transfer price adjustments', amount(side => side.costOfSales.adjustments), { indent: false });
     line(id === 'CH' ? 'Poland toll fee booked outside stock, including the year-end true-up' : 'Fees booked to cost of sales', amount(side => side.costOfSales.fees), { indent: false });
     line('Customs duty on year-end adjustments', amount(side => side.costOfSales.other), { indent: false });
@@ -139,7 +181,10 @@ function buildRows({ id, budget, actual }) {
       // Units made, converted or bought. Beginning stock plus these less cost of sales is ending stock.
       if (!finished) continue;
       sub(title);
-      for (const family of families) line(PRODUCTS[family].name, side => side.received[family], { keep: true });
+      for (const family of families) {
+        line(PRODUCTS[family].name, side => side.received[family], { keep: true });
+        layers('finished', side => side.received[family]);
+      }
       line('Finished goods received', side => ({ units: sumOf(Object.values(side.received), entry => entry.units), amount: sumOf(Object.values(side.received), entry => entry.amount) }), { type: 'subtotal', keep: true, indent: false });
       continue;
     }
@@ -147,8 +192,10 @@ function buildRows({ id, budget, actual }) {
     const stockOf = side => side.inventory?.[end] ?? null;
     for (const name of bins) {
       const [stage, product] = name.split('/');
+      const bin = side => stockOf(side)?.find(row => row.stage === stage && row.product === product);
       line(`${PRODUCTS[product].name}${stage === 'finished' ? '' : `, ${stageNames[stage]}`}`,
-        side => stockOf(side) ? stockOf(side).find(row => row.stage === stage && row.product === product) ?? { units: 0, amount: 0 } : null, { keep: true });
+        side => stockOf(side) ? bin(side) ?? { units: 0, amount: 0 } : null, { keep: true });
+      layers(stage, bin);
     }
     line(end === 'opening' ? 'Beginning inventory' : 'Ending inventory',
       side => stockOf(side) ? { units: sumOf(stockOf(side), row => row.units), amount: sumOf(stockOf(side), row => row.amount) } : null, { type: 'subtotal', keep: true, indent: false });
@@ -174,9 +221,10 @@ function rowHtml(row) {
 /**
  * The entity detail report: one legal entity, by month or by year, budget beside actual.
  * `entities` lists the ids the reader can choose from, and `calendar` is the month selector
- * shown in the monthly view.
+ * shown in the monthly view. `layers` breaks cost of sales and stock out by the month the
+ * units came in.
  */
-export function renderEntityDetail({ detail, entities, calendar = '' }) {
+export function renderEntityDetail({ detail, entities, calendar = '', layers = true }) {
   const { id, basis, period, revealed } = detail;
   const month = monthNames[period];
   const budgetLabel = basis === 'year' ? 'Budget · full year 2027' : `Budget · ${month}`;
@@ -198,6 +246,13 @@ export function renderEntityDetail({ detail, entities, calendar = '' }) {
           <button type="button" data-detail-basis="year" aria-pressed="${basis === 'year'}">Annual</button>
         </div>
       </div>
+      <div class="entity-basis">
+        <span id="detail-layers-label">Stock layers</span>
+        <div class="segmented" role="group" aria-labelledby="detail-layers-label">
+          <button type="button" data-detail-layers="show" aria-pressed="${layers}">Show</button>
+          <button type="button" data-detail-layers="hide" aria-pressed="${!layers}">Hide</button>
+        </div>
+      </div>
     </section>
     ${basis === 'month' ? calendar : ''}
     <section class="panel entity-report" aria-labelledby="detail-heading">
@@ -209,8 +264,10 @@ export function renderEntityDetail({ detail, entities, calendar = '' }) {
           <tr><th scope="col" rowspan="2">Line</th><th scope="colgroup" colspan="3">${html(budgetLabel)}</th><th scope="colgroup" colspan="3" class="entity-actual">${html(actualLabel)}</th></tr>
           <tr><th scope="col">Units</th><th scope="col">Per unit</th><th scope="col">Amount</th><th scope="col" class="entity-actual">Units</th><th scope="col">Per unit</th><th scope="col">Amount</th></tr>
         </thead>
-        <tbody>${buildRows(detail).map(rowHtml).join('')}</tbody>
+        <tbody>${buildRows(detail, layers).map(rowHtml).join('')}</tbody>
       </table></div>
-      <p class="field-note panel-note">Each goods line is units times the value per unit. Net sales use the net sales price, and cost of sales and inventory use the value the units are carried at in stock, first in, first out. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard.</p>
+      <p class="field-note panel-note">Each goods line is units times the value per unit. Net sales use the net sales price. Cost of sales and inventory use the value the units are carried at in stock, first in, first out: the oldest layer is sold first. ${layers
+        ? 'A layer is the units that came in during one month at one value, which for a distributor is that month’s transfer price plus any customs duty. A product line’s value per unit is the average of its layers.'
+        : 'Turn on stock layers to see the months and prices behind each average.'} To trace a transfer price change, find the new price under Finished goods received in the month it takes effect, then follow that layer into cost of sales once the older layers are sold. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard.</p>
     </section>`;
 }

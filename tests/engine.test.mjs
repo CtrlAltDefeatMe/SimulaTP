@@ -793,3 +793,81 @@ test('the entity detail report shows service fees, the royalty and stock the way
   assert.throws(() => report('DE', { period: 12 }), /January and December/)
   assert.throws(() => report('DE', { revealed: 13 }), /between 0 and 12/)
 })
+
+test('the entity detail report lists cost of sales and stock by first-in, first-out layer', () => {
+  const config = createConfig()
+  const year = runYear(config)
+  const companies = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)
+  const each = layers => layers.map(layer => cents(layer.amount / layer.units))
+  // Every line is the sum of its layers, in units and in value, and no layer is listed twice.
+  for (const id of companies) {
+    for (const [basis, period, revealed] of [['month', 0, 12], ['month', 8, 12], ['month', 3, 3], ['year', 0, 5], ['year', 0, 12]]) {
+      const detail = entityDetail(config, year, id, { basis, period, revealed })
+      for (const side of [detail.budget, detail.actual]) {
+        const lines = [
+          ...Object.values(side.costOfSales.products), ...Object.values(side.received),
+          ...(side.inventory.opening ?? []), ...(side.inventory.closing ?? []),
+        ]
+        for (const line of lines) {
+          assert.equal(line.layers.reduce((sum, layer) => sum + layer.units, 0), line.units, id)
+          assert.ok(Math.abs(line.layers.reduce((sum, layer) => sum + layer.amount, 0) - line.amount) < 0.005, id)
+          assert.equal(new Set(line.layers.map(layer => layer.key)).size, line.layers.length, id)
+          assert.deepEqual(line.layers.map(layer => layer.key), line.layers.map(layer => layer.key).sort(), id)
+          assert.ok(line.layers.every(layer => layer.units > 0 && layer.duty >= 0 && layer.duty < layer.amount), id)
+        }
+      }
+    }
+  }
+
+  // Germany opens with two layers of Precision Components. January sells out of the older, cheaper one,
+  // so its cost per unit is below the average value of the stock it started with.
+  const january = entityDetail(config, year, 'DE', { basis: 'month', period: 0, revealed: 0 }).budget
+  const opening = january.inventory.opening.find(row => row.product === 'A')
+  assert.deepEqual(opening.layers.map(layer => [layer.vintage, layer.source, layer.units]), [['2026-11', 'bought', 360], ['2026-12', 'bought', 360]])
+  const [older, newer] = each(opening.layers)
+  assert.ok(older < newer)
+  const sold = january.costOfSales.products.A
+  assert.deepEqual(sold.layers.map(layer => layer.vintage), ['2026-11'])
+  assert.deepEqual(each(sold.layers), [older])
+  assert.ok(cents(sold.amount / sold.units) < cents(opening.amount / opening.units))
+  // What it buys in January comes in at January's transfer price and is still in stock at the end of the month.
+  assert.deepEqual(january.received.A.layers.map(layer => layer.vintage), ['2027-01'])
+  const price = reviewGoodsPricing(config, 0).routes.find(route => route.key === 'CH-DE').prices.find(entry => entry.product === 'A').applied
+  assert.deepEqual(each(january.received.A.layers), [cents(price)])
+  assert.deepEqual(january.inventory.closing.find(row => row.product === 'A').layers.map(layer => layer.vintage), ['2026-11', '2026-12', '2027-01'])
+
+  // A price raised at the March review shows in April's purchases at once, and in cost of sales only when that layer is reached.
+  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices
+  const raised = Object.fromEntries(current.map(entry => [entry.product, cents(entry.applied * 1.1)]))
+  const changedConfig = applyGoodsPrices(config, 3, { 'CH-DE': raised })
+  const changed = runYear(changedConfig)
+  const month = period => entityDetail(changedConfig, changed, 'DE', { basis: 'month', period, revealed: 12 }).actual
+  assert.deepEqual(each(month(3).received.A.layers), [raised.A])
+  assert.ok(month(3).costOfSales.products.A.layers.every(layer => layer.vintage < '2027-04'))
+  assert.ok(month(5).costOfSales.products.A.layers.some(layer => layer.vintage === '2027-04' && cents(layer.amount / layer.units) === raised.A))
+  // The budget keeps the opening price, so the same layer shows both prices side by side.
+  const april = entityDetail(changedConfig, changed, 'DE', { basis: 'month', period: 3, revealed: 12 })
+  assert.deepEqual(april.budget.received.A.layers.map(layer => layer.key), april.actual.received.A.layers.map(layer => layer.key))
+  assert.ok(each(april.budget.received.A.layers)[0] < raised.A)
+
+  // An importer in another customs block carries the duty inside the layer's value.
+  const asia = entityDetail(config, year, 'APAC', { basis: 'month', period: 2, revealed: 12 }).actual.received.A.layers
+  assert.equal(asia.length, 1)
+  assert.equal(cents(asia[0].duty / (asia[0].amount - asia[0].duty)), config.customs.rates['APAC.EU'].A)
+  assert.ok(entityDetail(config, year, 'DE', { basis: 'year', revealed: 12 }).actual.received.A.layers.every(layer => layer.duty === 0))
+  // Goods of two origins are listed apart only where the duty on them differs.
+  const split = createConfig()
+  split.customs.rates['APAC.US'].A = 0.12
+  const splitYear = runYear(split)
+  const origins = lines => new Set(lines.received.A.layers.map(layer => layer.declared))
+  assert.deepEqual([...origins(entityDetail(split, splitYear, 'APAC', { basis: 'year', revealed: 12 }).actual)].sort(), ['EU', 'US'])
+  assert.deepEqual([...origins(entityDetail(config, year, 'APAC', { basis: 'year', revealed: 12 }).actual)], [null])
+
+  // The United States holds what it made and what it bought from Switzerland as separate layers.
+  const us = entityDetail(config, year, 'US', { basis: 'month', period: 1, revealed: 12 }).actual.received.A.layers
+  assert.deepEqual(us.map(layer => layer.source), ['made', 'bought'])
+  assert.ok(us[1].duty > 0)
+  // Switzerland's converted goods are layered by the month their materials were bought.
+  const swiss = entityDetail(config, year, 'CH', { basis: 'month', period: 1, revealed: 12 }).actual.received.A.layers
+  assert.deepEqual(swiss.map(layer => [layer.source, layer.materials]), [['converted', '2027-01'], ['converted', '2027-02'], ['bought', null]])
+})

@@ -231,6 +231,9 @@ tbody tr:hover td, .selected-row td { background: #f4f9fe; }
 .entity-heading th { padding-top: 9px; padding-bottom: 9px; background: #eef3f9; color: var(--navy); font-size: 11px; font-weight: 740; letter-spacing: 0.05em; text-align: left; text-transform: uppercase; }
 .entity-sub th { padding-top: 12px; padding-bottom: 5px; border-bottom: 0; background: transparent; color: var(--secondary); font-weight: 690; text-align: left; }
 .entity-line th, .entity-line td { padding-top: 7px; padding-bottom: 7px; }
+.entity-layer th, .entity-layer td { padding-top: 4px; padding-bottom: 4px; border-bottom-color: transparent; color: var(--secondary); font-size: 11px; }
+.entity-table .entity-layer th.entity-indent { padding-left: 56px; font-weight: 500; color: var(--secondary); }
+.entity-duty { display: block; color: var(--secondary); font-size: 10px; font-weight: 500; }
 .entity-subtotal th[scope="row"], .entity-subtotal td { border-top: 1px solid #cbd6e4; color: var(--navy); font-weight: 690; }
 .entity-total th[scope="row"], .entity-total td { border-top: 1px solid #afbdcf; background: #f6f8fb; color: var(--navy); font-weight: 740; }
 .entity-note td { color: var(--secondary); text-align: left; white-space: normal; }
@@ -351,6 +354,7 @@ input, select {
   /* The line names stay in view while the amounts scroll sideways. */
   .entity-table th[scope="row"] { position: sticky; left: 0; min-width: 132px; max-width: 150px; background: #fff; box-shadow: 1px 0 0 var(--line); }
   .entity-table th.entity-indent { padding-left: 20px; }
+  .entity-table .entity-layer th.entity-indent { padding-left: 28px; }
   .entity-total th[scope="row"] { background: #f6f8fb; }
   .entity-stick { left: 13px; max-width: calc(100vw - 60px); white-space: normal; }
 }

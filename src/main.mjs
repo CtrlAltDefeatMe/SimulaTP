@@ -132,6 +132,7 @@ const state = {
   // The entity report: which company, and whether by month or for the year.
   detailEntity: 'US',
   detailBasis: 'month',
+  detailLayers: true,
 };
 let runTimer = null;
 
@@ -492,7 +493,7 @@ function renderEntities() {
   const detail = entityDetail(state.config, state.year, state.detailEntity, {
     basis: state.detailBasis, period: state.period, revealed: state.revealed,
   });
-  pageBody.innerHTML = renderEntityDetail({ detail, entities: legalEntities, calendar: monthStrip() });
+  pageBody.innerHTML = renderEntityDetail({ detail, entities: legalEntities, calendar: monthStrip(), layers: state.detailLayers });
 }
 
 function renderDashboard() {
@@ -968,7 +969,7 @@ function renderSettings() {
             })}</td>`).join('')}
           </tr>`).join('')}</tbody>
         </table></div>
-        <p class="field-note panel-note">Europe is one customs block: the EU, Switzerland and the United Kingdom. Goods that move inside a block, or return to the block that made them, pay no duty. Duty is charged each time goods enter a block, on their declared transfer price. The importer adds it to the cost of the goods, so it reaches cost of sales when they are sold, and policy prices to distributors in another block are set net of it. The consolidated target margin above is held when these rates change: unit costs are rescaled around the duty. Canada is supplied from the US plant, so no Europe-made goods reach it in this supply chain and that row has no effect.</p>
+        <p class="field-note panel-note">Europe is one customs block: the EU, Switzerland and the United Kingdom. Goods that move inside a block, or return to the block that made them, pay no duty. Duty is charged each time goods enter a block, on their declared transfer price. The importer adds it to the cost of the goods, so it reaches cost of sales when they are sold, and policy prices to distributors in another block are set net of it. The consolidated target margin above is held when these rates change: unit costs are rescaled around the duty. Canada is supplied from the United States. Europe-made goods reach it only in a month when the US plant is at its limit and passes on stock bought from Switzerland, so that row applies to a small share of Canada’s imports.</p>
       </section>
       <div id="scenario-message" aria-live="polite">${state.settingsMessage ? `<p class="form-message">${html(state.settingsMessage)}</p>` : ''}</div>
       <div class="panel form-footer">
@@ -1139,7 +1140,7 @@ function setView(view, { focus = false } = {}) {
 }
 
 function focusAfterRender(button) {
-  const { action, period, metric, filter, mapEntity, detailBasis } = button.dataset;
+  const { action, period, metric, filter, mapEntity, detailBasis, detailLayers } = button.dataset;
   const className = ['month-button', 'bar-group', 'table-select'].find((key) => button.classList.contains(key));
   const selector = action ? `[data-action="${action}"]`
     : period !== undefined && className ? `.${className}[data-period="${period}"]`
@@ -1147,6 +1148,7 @@ function focusAfterRender(button) {
     : filter ? `[data-filter="${filter}"]`
     : mapEntity ? `[data-map-entity="${mapEntity}"]`
     : detailBasis ? `[data-detail-basis="${detailBasis}"]`
+    : detailLayers ? `[data-detail-layers="${detailLayers}"]`
     : null;
   if (selector) document.querySelector(selector)?.focus({ preventScroll: true });
 }
@@ -1172,7 +1174,7 @@ document.addEventListener('click', (event) => {
     useGoodsPriceQuote(button);
     return;
   }
-  const { action, period, metric, filter, mapEntity, detailBasis } = button.dataset;
+  const { action, period, metric, filter, mapEntity, detailBasis, detailLayers } = button.dataset;
   if (action === 'run-year') {
     runFullYear();
     return;
@@ -1217,6 +1219,9 @@ document.addEventListener('click', (event) => {
   } else if (detailBasis === 'month' || detailBasis === 'year') {
     state.detailBasis = detailBasis;
     announcement.textContent = detailBasis === 'year' ? 'Annual amounts shown.' : 'Monthly amounts shown.';
+  } else if (detailLayers === 'show' || detailLayers === 'hide') {
+    state.detailLayers = detailLayers === 'show';
+    announcement.textContent = state.detailLayers ? 'Stock layers shown.' : 'Stock layers hidden.';
   } else {
     return;
   }
