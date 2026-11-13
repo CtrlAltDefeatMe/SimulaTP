@@ -1269,6 +1269,16 @@ test('the entity detail report carries the US tax computation for the United Sta
   assert.equal(quarter.budget.usTax.total, usIncomeTax(config, year.budget.slice(3, 6)).total)
   assert.equal(quarter.actual.usTax.total, 0)
   for (const id of ['CH', 'DE', 'PL', 'IN']) assert.equal(entityDetail(config, year, id, { basis: 'year', revealed: 12 }).actual.usTax, null)
+  // Every line of the report has its label and seven cells: units, value per unit and amount for each side.
+  // (The fourth row was once drawn with three, because Array.map passed its index as the column count.)
+  for (const basis of ['quarter', 'year']) {
+    const report = renderEntityDetail({ detail: entityDetail(config, year, 'US', { basis, period: 0, revealed: 12 }), entities: ['US', 'DE'] })
+    const main = report.slice(0, report.indexOf('entity-tax-table'))
+    const lines = [...main.matchAll(/<tr class="entity-(?:line|subtotal|total|layer)">([\s\S]*?)<\/tr>/g)]
+    assert.ok(lines.length > 20)
+    for (const [, cells] of lines) assert.equal((cells.match(/<td>/g) ?? []).length, 6, cells.slice(0, 120))
+    assert.ok(![...main.slice(main.indexOf('<tbody>')).matchAll(/colspan="(\d+)"/g)].some(([, span]) => span !== '7'))
+  }
   // The computation has its own table with one amount column a side, so it reads on a phone.
   const page = renderEntityDetail({ detail: us, entities: ['US', 'DE'] })
   const taxTable = page.slice(page.indexOf('entity-tax-table'))
