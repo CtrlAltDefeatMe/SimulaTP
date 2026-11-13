@@ -1226,6 +1226,20 @@ export function usIncomeTax(config, months, stat = null) {
   }
 }
 
+// The rates behind the entity report, for the Parameters sheet of the Excel export.
+export function reportParameters(config) {
+  return {
+    taxRates: Object.fromEntries(TAXED_ENTITIES.map(id => [id, taxRate(config, id)])),
+    royaltyRate: config.policies.royaltyRate,
+    rdMarkup: RD_MARKUP,
+    usServicesMarkup: config.policies.usServicesMarkup,
+    belgiumMargin: config.policies.belgiumMargin,
+    indiaShares: { ...INDIA_CUSTOMERS },
+    dutyRates: dutyRates((key, family) => dutyRate(config, key, family)),
+    customsBlocks: Object.fromEntries(ALL_COMPANIES.map(id => [id, customsBlock(id)])),
+  }
+}
+
 const emptyLanes = config => Object.fromEntries(CUSTOMS_LANES.map(({ key, importer, origin }) => [key, {
   importer, origin, value: 0, duty: 0,
   products: Object.fromEntries(FAMILIES.map(family => [family, { rate: dutyRate(config, key, family), value: 0, duty: 0 }])),
