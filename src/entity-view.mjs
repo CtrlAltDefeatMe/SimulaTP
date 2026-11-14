@@ -1,4 +1,4 @@
-import { ENTITIES, PRODUCTS, US_TAX_RULES } from './engine.mjs';
+import { ENTITIES, FIXED_ASSET_CLASSES, PAYMENT_TERMS, PRODUCTS, US_BONDS, US_TAX_RULES } from './engine.mjs';
 import { IN_THOUSANDS, realSize, thousands, unitCount, unitPrice } from './format.mjs';
 
 // Amounts are in thousands of dollars and units in thousands, so a value per unit is in dollars.
@@ -71,6 +71,8 @@ function layerLabel(id, stage, layer, showOrigin) {
 // Formulas for the Excel export. Each takes `f`, which turns a row's key into a cell reference
 // (see entity-export.mjs), and returns the formula without its equals sign, or null for none.
 const unitsTimesValue = f => `${f.u(f.self)}*${f.e(f.self)}`;
+// A service provider's cost incurred: its own costs and the depreciation inside them.
+const costIncurred = f => `(${f.sum(['ownCosts', ...f.keys('depreciation/')])})`;
 const sumOfLayers = f => f.children(f.self).length ? f.sum(f.children(f.self)) : null;
 // Revenue lines that follow from a line elsewhere: the royalty from the Swiss royalty base, the
 // headquarters fee from its cost, and R&D services from the R&D cost they recharge.
@@ -155,7 +157,7 @@ export function buildRows({ id, basis, budget, actual }, showLayers) {
     // A fixed fee is set on the Transfer prices page, so its markup is the fee less the budgeted cost.
     // The warehouse fee grosses its own operating cost up to leave its margin on the fee.
     line(fixed ? 'Budgeted service cost' : 'Warehouse cost', amount(side => side.service.budgetCost),
-      { keep: true, key: 'service/cost', calc: fixed ? null : f => f.v('ownCosts') });
+      { keep: true, key: 'service/cost', calc: fixed ? null : costIncurred });
     line(fixed ? 'Markup' : 'Margin', amount(side => side.service.markup), {
       keep: true, key: 'service/markup',
       calc: fixed ? f => `${f.a('service/fee')}-${f.a('service/cost')}` : f => `${f.v('service/cost')}/(1-Margin_Belgian_Warehouse)-${f.v('service/cost')}`,
@@ -215,11 +217,18 @@ export function buildRows({ id, basis, budget, actual }, showLayers) {
     line(chargeNames[policy] ?? policy, amount(side => side.charges.find(entry => entry.policy === policy)?.amount ?? 0),
       { keep: true, indent: false, key: `charge/${policy}`, calc: chargeCalc(id)[policy] });
   }
-  line(service ? 'Service cost incurred' : 'Own operating costs', amount(side => side.ownCosts), { keep: true, indent: false, key: 'ownCosts' });
+  line(service ? 'Service cost incurred, before depreciation' : 'Own operating costs, before depreciation', amount(side => side.ownCosts), { keep: true, indent: false, key: 'ownCosts' });
+  // Depreciation is worked out from the fixed assets on the balance sheet: cost over useful life.
+  for (const [kind, name] of Object.entries(FIXED_ASSET_CLASSES)) {
+    line(`Depreciation, ${name.toLowerCase()}`, amount(side => side.depreciation[kind]), {
+      indent: false, key: `depreciation/${kind}`,
+      calc: f => `${f.s(`bs/${kind}/cost`)}/Life_${id}_${kind === 'buildings' ? 'Buildings' : 'Equipment'}*${f.side.months}/12`,
+    });
+  }
   line('Own R&D cost', amount(side => side.ownResearch), { indent: false, key: 'ownResearch' });
   line('Total operating expenses', amount(side => side.operatingExpenses), {
     type: 'total', keep: true, indent: false, key: 'opex',
-    calc: f => f.sum(['royalty', ...f.keys('charge/'), 'ownCosts', 'ownResearch']),
+    calc: f => f.sum(['royalty', ...f.keys('charge/'), 'ownCosts', ...f.keys('depreciation/'), 'ownResearch']),
   });
 
   heading('Result');
@@ -231,14 +240,27 @@ export function buildRows({ id, basis, budget, actual }, showLayers) {
     { kind: 'percent', keep: true, indent: false, key: 'margin', calc: f => `${f.v('op')}/${f.v('revenue')}` });
   if (service?.kind === 'fixed') {
     line('Markup earned on service cost incurred', amount(side => side.service.cost ? (side.service.fee + side.service.trueUp) / side.service.cost - 1 : NaN),
-      { kind: 'percent', keep: true, indent: false, key: 'markupEarned', calc: f => `(${f.v('service/fee')}+${f.v('service/trueUp')})/${f.v('ownCosts')}-1` });
+      { kind: 'percent', keep: true, indent: false, key: 'markupEarned', calc: f => `(${f.v('service/fee')}+${f.v('service/trueUp')})/${costIncurred(f)}-1` });
   }
-  if (budget.usTax) {
-    line('US income tax, federal and state, worked out below', amount(side => -side.usTax.total),
-      { keep: true, indent: false, key: 'usTax', calc: f => `-${f.v('tax/total')}` });
-    line('Profit after tax', amount(side => side.operatingProfit - side.usTax.total),
-      { type: 'total', keep: true, indent: false, key: 'afterTax', calc: f => `${f.v('op')}+${f.v('usTax')}` });
+  // Only the US parent borrows: its bonds pay interest below operating profit.
+  if (id === 'US') {
+    line('Interest on bonds', amount(side => side.interest), {
+      keep: true, indent: false, key: 'interest', calc: f => `${f.s('bs/bonds')}*Rate_Bond_Interest*${f.side.months}/12`,
+    });
+    line('Profit before tax', amount(side => side.profitBeforeTax), {
+      type: 'subtotal', keep: true, indent: false, key: 'pbt', calc: f => `${f.v('op')}-${f.v('interest')}`,
+    });
   }
+  // Tax is accrued on the year to date. The true-up holds what working it out on the period alone misses.
+  const taxRate = budget.tax?.rate ?? actual.tax?.rate;
+  line(budget.usTax ? 'US income tax, federal and state, worked out below' : `Income tax at ${rate.format(taxRate)} of operating profit`,
+    amount(side => side.tax?.base), {
+      keep: true, indent: false, key: 'tax', calc: budget.usTax ? f => f.v('tax/total') : f => `Rate_Tax_${id}*${f.v('op')}`,
+    });
+  line('Income tax true-up to the year to date and to local statutory profit', amount(side => side.tax?.adjustment), { indent: false, key: 'taxTrueUp' });
+  line('Profit after tax', amount(side => side.tax ? side.profitAfterTax : undefined), {
+    type: 'total', keep: true, indent: false, key: 'afterTax', calc: f => `${f.v(f.has('pbt') ? 'pbt' : 'op')}-${f.v('tax')}-${f.v('taxTrueUp')}`,
+  });
 
   // Stock at the two ends of the period, at the value it is carried at.
   const stockNames = stock => stock ? stock.map(({ stage, product }) => stage + '/' + product) : [];
@@ -287,6 +309,100 @@ export function buildRows({ id, basis, budget, actual }, showLayers) {
   return rows;
 }
 
+// The balance sheet at the start and the end of the period, and the ratios for the period.
+// A balance line's sides hold `start` and `end`; `amount` is the end, which its formula works out.
+export function buildBalanceRows({ id, budget, actual }) {
+  const rows = [];
+  const sides = [budget, actual];
+  const { heading, sub, note } = rowHelpers(sides, rows);
+  const line = (label, pick, { type = 'line', key, calc, indent = true, keep = false } = {}) => {
+    const values = sides.map(side => {
+      const { start, end } = side.balance ?? {};
+      if (!start && !end) return null;
+      const at = sheet => sheet ? pick(sheet) : undefined;
+      return { start: at(start), end: at(end), amount: at(end) };
+    });
+    const empty = side => !side || (Math.abs(side.start ?? 0) < 0.005 && Math.abs(side.end ?? 0) < 0.005);
+    if (!keep && values.every(empty)) return;
+    rows.push({ type, label, kind: 'balance', key, calc, indent, budget: values[0], actual: values[1] });
+  };
+  const ratio = (label, pick, kind, { key, calc }) => {
+    const values = sides.map(side => side.ratios ? { amount: pick(side.ratios, side) } : side.balance?.start ? {} : null);
+    rows.push({ type: 'line', label, kind, key, calc, indent: false, budget: values[0], actual: values[1] });
+  };
+  const has = kind => sides.some(side => side.balance?.start?.fixedAssets[kind]);
+  // A balance at the start of the period, and the change in the period, for the cash formula.
+  const start = (f, key) => f.s(`bs/${key}`);
+  const change = (f, keys) => keys.map(key => `(${f.v(`bs/${key}`)}-${start(f, key)})`).join('+');
+
+  heading('Assets');
+  line('Cash', sheet => sheet.cash, {
+    keep: true, indent: false, key: 'bs/cash',
+    // Cash moves with profit before tax and depreciation, less what is tied up in receivables and stock, plus what is owed.
+    calc: f => `${start(f, 'cash')}+${f.v(f.has('pbt') ? 'pbt' : 'op')}+${f.sum(f.keys('depreciation/'))}-(${change(f, ['receivables/thirdParty', 'receivables/related', 'inventory'])})+${change(f, ['payables/thirdParty', 'payables/related'])}`,
+  });
+  line(`Receivables from customers, ${PAYMENT_TERMS.thirdParty.days} days`, sheet => sheet.receivables.thirdParty, { keep: true, indent: false, key: 'bs/receivables/thirdParty' });
+  line(`Receivables from group companies, ${PAYMENT_TERMS.related.days} days`, sheet => sheet.receivables.related, { keep: true, indent: false, key: 'bs/receivables/related' });
+  line('Inventory', sheet => sheet.inventory, { keep: true, indent: false, key: 'bs/inventory', calc: f => f.v('stock/closing') });
+  for (const [kind, name] of Object.entries(FIXED_ASSET_CLASSES)) {
+    if (!has(kind)) continue;
+    line(`${name}, at cost`, sheet => sheet.fixedAssets[kind]?.cost ?? 0, { key: `bs/${kind}/cost`, calc: f => start(f, `${kind}/cost`) });
+    line(`${name}, accumulated depreciation`, sheet => -(sheet.fixedAssets[kind]?.depreciated ?? 0), {
+      key: `bs/${kind}/depreciated`, calc: f => `${start(f, `${kind}/depreciated`)}-${f.v(`depreciation/${kind}`)}`,
+    });
+  }
+  line('Fixed assets, net', sheet => sheet.fixedAssets.net, {
+    type: 'subtotal', keep: true, indent: false, key: 'bs/fixedAssets',
+    calc: f => f.sum(Object.keys(FIXED_ASSET_CLASSES).flatMap(kind => [`bs/${kind}/cost`, `bs/${kind}/depreciated`])),
+  });
+  line('Total assets', sheet => sheet.assets, {
+    type: 'total', keep: true, indent: false, key: 'bs/assets',
+    calc: f => f.sum(['bs/cash', 'bs/receivables/thirdParty', 'bs/receivables/related', 'bs/inventory', 'bs/fixedAssets']),
+  });
+
+  heading('Liabilities and equity');
+  line(`Payables to suppliers, ${PAYMENT_TERMS.thirdParty.days} days`, sheet => sheet.payables.thirdParty, { keep: true, indent: false, key: 'bs/payables/thirdParty' });
+  line(`Payables to group companies, ${PAYMENT_TERMS.related.days} days`, sheet => sheet.payables.related, { keep: true, indent: false, key: 'bs/payables/related' });
+  line('Income tax payable, on the year to date', sheet => sheet.taxPayable, {
+    keep: true, indent: false, key: 'bs/taxPayable', calc: f => `${start(f, 'taxPayable')}+${f.v('tax')}+${f.v('taxTrueUp')}`,
+  });
+  if (id === 'US') line(`Bonds, ${rate.format(US_BONDS.rate)} coupon`, sheet => sheet.bonds, { keep: true, indent: false, key: 'bs/bonds', calc: f => start(f, 'bonds') });
+  line('Total liabilities', sheet => sheet.liabilities, {
+    type: 'subtotal', keep: true, indent: false, key: 'bs/liabilities',
+    calc: f => f.sum(['bs/payables/thirdParty', 'bs/payables/related', 'bs/taxPayable', 'bs/bonds']),
+  });
+  line('Equity', sheet => sheet.equity, { keep: true, indent: false, key: 'bs/equity', calc: f => `${start(f, 'equity')}+${f.v('afterTax')}` });
+  line('Total liabilities and equity', sheet => sheet.liabilitiesAndEquity, {
+    type: 'total', keep: true, indent: false, key: 'bs/liabilitiesAndEquity', calc: f => `${f.v('bs/liabilities')}+${f.v('bs/equity')}`,
+  });
+
+  sub('Ratios for the period, annualized');
+  // Averages are of the balances at the start and the end of the period.
+  const average = (f, key) => `((${start(f, key)}+${f.v(`bs/${key}`)})/2)`;
+  const year = f => `12/${f.side.months}`;
+  ratio('Return on assets: operating profit over average total assets', ratios => ratios.returnOnAssets, 'percent', {
+    key: 'ratio/roa', calc: f => `${f.v('op')}*${year(f)}/${average(f, 'assets')}`,
+  });
+  ratio('Return on operating assets: receivables, inventory and fixed assets, without cash', ratios => ratios.returnOnOperatingAssets, 'percent', {
+    key: 'ratio/rooa',
+    calc: f => `${f.v('op')}*${year(f)}/((${['receivables/thirdParty', 'receivables/related', 'inventory', 'fixedAssets'].map(key => `${start(f, key)}+${f.v(`bs/${key}`)}`).join('+')})/2)`,
+  });
+  ratio('Asset turnover: revenue over average total assets', ratios => ratios.assetTurnover, 'times', {
+    key: 'ratio/turnover', calc: f => `${f.v('revenue')}*${year(f)}/${average(f, 'assets')}`,
+  });
+  ratio('Receivable days, at the end', ratios => ratios.receivableDays, 'days', {
+    key: 'ratio/receivableDays', calc: f => `(${f.v('bs/receivables/thirdParty')}+${f.v('bs/receivables/related')})/${f.v('revenue')}*${f.side.months}*365/12`,
+  });
+  if (sides.some(side => side.balance?.start?.inventory || side.balance?.end?.inventory)) {
+    ratio('Inventory days, at the end, on cost of sales', ratios => ratios.inventoryDays, 'days', {
+      key: 'ratio/inventoryDays', calc: f => `${f.v('bs/inventory')}/${f.v('cogs')}*${f.side.months}*365/12`,
+    });
+  }
+  if (id === 'US') ratio('Bonds as a share of equity, at the end', ratios => ratios.bondsToEquity, 'percent', { key: 'ratio/bonds', calc: f => `${f.v('bs/bonds')}/${f.v('bs/equity')}` });
+  note(`Customers pay in ${PAYMENT_TERMS.thirdParty.days} days and group companies in ${PAYMENT_TERMS.related.days}, and the entity pays its suppliers and group companies on the same terms. Fixed assets are depreciated straight line over their useful lives, with no additions in the year. Income tax is accrued on the year to date and paid after the year end. Cash moves with profit before tax and depreciation, less the increase in receivables and inventory, plus the increase in payables.${id === 'US' ? ' The bonds pay interest as it falls due.' : ''}`);
+  return rows;
+}
+
 // The US parent's income tax, step by step: taxable income, FDDEI, NCTI and BEAT.
 // It has amounts only, so it gets its own table with one amount column a side: on a phone the
 // amounts then sit beside their labels instead of off to the right of the units and prices.
@@ -298,7 +414,7 @@ export function buildTaxRows({ budget, actual }) {
   const rules = US_TAX_RULES;
   const tax = pick => amount(side => pick(side.usTax));
   const flat = { indent: false };
-  note(`Federal tax at ${rate.format(rules.federalRate)} under the rules for tax years beginning after 2025, plus state tax at ${rate.format(budget.usTax.stateRate)} of operating profit. Worked out on the period’s figures as if they were a tax year. Every foreign subsidiary is treated as a controlled foreign corporation (CFC) wholly owned by the US parent. Taxable income is taken as US GAAP operating profit, with no interest and no credits other than the NCTI credit.`);
+  note(`Federal tax at ${rate.format(rules.federalRate)} under the rules for tax years beginning after 2025, plus state tax at ${rate.format(budget.usTax.stateRate)} of operating profit less interest. Worked out on the period’s figures as if they were a tax year. Every foreign subsidiary is treated as a controlled foreign corporation (CFC) wholly owned by the US parent. Taxable income starts from US GAAP operating profit less the interest on the bonds, which is well inside the section 163(j) limit. There are no credits other than the NCTI credit.`);
 
   // The formulas follow usIncomeTax in engine.mjs step by step. Shared pieces:
   const v = (f, key) => f.v(`tax/${key}`);
@@ -307,7 +423,7 @@ export function buildTaxRows({ budget, actual }) {
   // The section 250 limit: both deductions are cut back in proportion where they exceed taxable income before them.
   const limit = f => {
     const claimed = `(${fddeiBase(f)}+${v(f, 'ncti')}+${v(f, 'grossUp')})`;
-    const before = `(${v(f, 'operatingProfit')}-${v(f, 'state')}+${v(f, 'ncti')}+${v(f, 'grossUp')})`;
+    const before = `(${v(f, 'operatingProfit')}+${v(f, 'interest')}-${v(f, 'state')}+${v(f, 'ncti')}+${v(f, 'grossUp')})`;
     return `IF(${claimed}>0,MIN(1,MAX(0,${before})/${claimed}),1)`;
   };
   const cfcRange = f => f.range(f.keys('tax/cfc/'));
@@ -316,14 +432,17 @@ export function buildTaxRows({ budget, actual }) {
 
   sub('Taxable income and tax');
   line('Operating profit, US GAAP', tax(t => t.operatingProfit), { keep: true, key: 'tax/operatingProfit', calc: f => f.v('op') });
-  line('State income tax, deductible', tax(t => -t.state), { keep: true, key: 'tax/stateDeduction', calc: f => `-MAX(0,${v(f, 'operatingProfit')})*Rate_State` });
+  line('Interest on bonds', tax(t => -t.interest), { keep: true, key: 'tax/interest', calc: f => `-${f.v('interest')}` });
+  line('State income tax, deductible', tax(t => -t.state), {
+    keep: true, key: 'tax/stateDeduction', calc: f => `-MAX(0,${v(f, 'operatingProfit')}+${v(f, 'interest')})*Rate_State`,
+  });
   line('NCTI inclusion', tax(t => t.ncti.amount), { keep: true, key: 'tax/inclusion', calc: f => v(f, 'ncti') });
   line('Section 78 gross-up', tax(t => t.ncti.grossUp), { keep: true, key: 'tax/inclusionGrossUp', calc: f => v(f, 'grossUp') });
   line(`Section 250 deduction on FDDEI, ${rate.format(rules.fddeiDeduction)}`, tax(t => -t.fddei.deduction), { keep: true, key: 'tax/fddeiDeductionTaken', calc: f => `-${v(f, 'fddei/deduction')}` });
   line(`Section 250 deduction on NCTI, ${rate.format(rules.nctiDeduction)}`, tax(t => -t.ncti.deduction), { keep: true, key: 'tax/nctiDeductionTaken', calc: f => v(f, 'ncti/deduction') });
   line('Taxable income', tax(t => t.taxableIncome), {
     type: 'subtotal', keep: true, ...flat, key: 'tax/taxableIncome',
-    calc: f => f.sum(['operatingProfit', 'stateDeduction', 'inclusion', 'inclusionGrossUp', 'fddeiDeductionTaken', 'nctiDeductionTaken'].map(key => `tax/${key}`)),
+    calc: f => f.sum(['operatingProfit', 'interest', 'stateDeduction', 'inclusion', 'inclusionGrossUp', 'fddeiDeductionTaken', 'nctiDeductionTaken'].map(key => `tax/${key}`)),
   });
   line(`Federal tax at ${rate.format(rules.federalRate)}`, tax(t => t.taxBeforeCredits), { keep: true, key: 'tax/federal', calc: f => `MAX(0,${v(f, 'taxableIncome')})*Rate_Federal` });
   line('Foreign tax credit on NCTI', tax(t => -t.credit), { keep: true, key: 'tax/creditTaken', calc: f => `-${v(f, 'ncti/credit')}` });
@@ -401,7 +520,9 @@ export function buildTaxRows({ budget, actual }) {
   line('R&D services from Germany and Poland, in full', tax(t => t.beat.research), { keep: true, key: 'tax/beat/research', calc: f => f.v('charge/RD_SERVICES') });
   line('India service fee', tax(t => t.beat.indiaFee), { keep: true, key: 'tax/beat/indiaFee', calc: f => f.v('charge/IN_SERVICES') });
   line('Less its cost, excepted under the services cost method', tax(t => -t.beat.indiaCost), {
-    keep: true, key: 'tax/beat/indiaCost', calc: f => f.x('IN', 'ownCosts') && `-${f.x('IN', 'ownCosts')}*India_Share_US`,
+    keep: true, key: 'tax/beat/indiaCost',
+    // India's cost incurred includes the depreciation of its equipment.
+    calc: f => f.x('IN', 'ownCosts') && `-(${f.x('IN', 'ownCosts')}+${f.x('IN', 'depreciation/equipment')})*India_Share_US`,
   });
   line('Base erosion tax benefits', tax(t => t.beat.benefits), {
     type: 'subtotal', keep: true, ...flat, key: 'tax/beat/benefits',
@@ -409,7 +530,7 @@ export function buildTaxRows({ budget, actual }) {
     calc: f => `${v(f, 'beat/research')}+MAX(0,${v(f, 'beat/indiaFee')}+${v(f, 'beat/indiaCost')}+${f.v('charge/SERVICE_TRUE_UP')})`,
   });
   line('Deductions, excluding cost of goods sold, section 250 and the excepted cost', tax(t => t.beat.deductions), {
-    keep: true, key: 'tax/beat/deductions', calc: f => `${f.v('opex')}+${v(f, 'state')}+${v(f, 'beat/indiaCost')}`,
+    keep: true, key: 'tax/beat/deductions', calc: f => `${f.v('opex')}-${v(f, 'interest')}+${v(f, 'state')}+${v(f, 'beat/indiaCost')}`,
   });
   line(`Base erosion percentage, ${rate.format(rules.beatThreshold)} threshold`, tax(t => t.beat.deductions ? t.beat.percentage : NaN), {
     kind: 'percent', keep: true, key: 'tax/beat/percentage', calc: f => `${v(f, 'beat/benefits')}/${v(f, 'beat/deductions')}`,
@@ -442,10 +563,29 @@ function rowHtml(row, { span = 7 } = {}) {
   if (row.type === 'note') return `<tr class="entity-note"><td colspan="${span}"><span class="entity-stick">${html(row.text)}</span></td></tr>`;
   const label = `<th scope="row" class="${row.indent ? 'entity-indent' : ''}">${html(row.label)}</th>`;
   if (span === 3) return `<tr class="entity-${row.type}">${label}${amountCell(row.budget, row.kind)}${amountCell(row.actual, row.kind)}</tr>`;
+  if (span === 5) return `<tr class="entity-${row.type}">${label}${balanceCells(row.budget, row.kind)}${balanceCells(row.actual, row.kind)}</tr>`;
   return `<tr class="entity-${row.type}">
     ${label}${cells(row.budget, row.kind)}${cells(row.actual, row.kind)}
   </tr>`;
 }
+
+// A balance at the start and the end of the period, or a ratio for the period, for one side.
+function balanceCells(side, kind) {
+  if (!side) return '<td>—</td><td>—</td>';
+  if (kind === 'balance') return `<td>${side.start === undefined ? '—' : money(side.start)}</td><td>${side.end === undefined ? '—' : money(side.end)}</td>`;
+  return `<td></td><td>${ratioText(side.amount, kind)}</td>`;
+}
+
+export function ratioText(value, kind) {
+  if (!Number.isFinite(value)) return '—';
+  if (kind === 'percent') return percent.format(value);
+  if (kind === 'times') return `${value.toFixed(2)}×`;
+  return `${whole.format(value)} days`;
+}
+
+// The date of a balance sheet: the start of the year, or the end of a month.
+const MONTH_ENDS = ['31 Jan', '28 Feb', '31 Mar', '30 Apr', '31 May', '30 Jun', '31 Jul', '31 Aug', '30 Sep', '31 Oct', '30 Nov', '31 Dec'];
+export const balanceDate = sheet => sheet ? `${sheet.months ? MONTH_ENDS[sheet.months - 1] : '1 Jan'} 2027` : 'not revealed yet';
 
 // One amount for one side, for a table with no units or prices.
 function amountCell(side, kind) {
@@ -480,6 +620,8 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
   const { id, basis, period } = detail;
   const { budgetLabel, actualLabel, when, explain } = reportLabels(detail);
   const taxRows = buildTaxRows(detail);
+  const balanceRows = buildBalanceRows(detail);
+  const dates = side => [detail[side].balance.start, detail[side].balance.end].map(balanceDate);
   return `
     <section class="panel entity-controls" aria-label="Choose what to show">
       <label class="field">Legal entity
@@ -518,7 +660,18 @@ export function renderEntityDetail({ detail, entities, calendar = '', layers = t
       </table></div>
       <p class="field-note panel-note">Units are in thousands and amounts in ${IN_THOUSANDS}, so the value per unit is in dollars. Each goods line is units times the value per unit. Net sales use the net sales price. Cost of sales and inventory use the value the units are carried at in stock, first in, first out: the oldest layer is sold first. ${layers
         ? 'A layer is the units that came in at one value. For a distributor that is a quarter’s purchases at that quarter’s transfer price plus any customs duty. The plants’ cost moves every month, so their layers are by month. A product line’s value per unit is the average of its layers.'
-        : 'Turn on stock layers to see the purchases and prices behind each average.'} To trace a transfer price change, find the new price under Finished goods received in the quarter it takes effect, then follow that layer into cost of sales as the older layers are sold. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard.</p>
+        : 'Turn on stock layers to see the purchases and prices behind each average.'} To trace a transfer price change, find the new price under Finished goods received in the quarter it takes effect, then follow that layer into cost of sales as the older layers are sold. The lines add up to the entity’s revenue, cost of sales and operating expenses on the Dashboard. Depreciation is part of the entity’s own costs, worked out from its fixed assets on the balance sheet. Income tax is accrued on the year to date: the true-up holds the move to local statutory profit at the year end and, for the United States, what working out its limits on the year to date changes.</p>
+    </section>
+    <section class="panel entity-report" aria-labelledby="balance-heading">
+      <div class="panel-header"><div><h2 id="balance-heading">Balance sheet</h2>
+        <p class="subtitle">${when} · ${IN_THOUSANDS} · at the start and the end of the period, budget beside actual</p></div></div>
+      <div class="table-scroll" tabindex="0" role="region" aria-labelledby="balance-heading"><table class="entity-table entity-balance-table">
+        <thead>
+          <tr><th scope="col" rowspan="2">Line</th><th scope="colgroup" colspan="2">Budget</th><th scope="colgroup" colspan="2" class="entity-actual">Actual</th></tr>
+          <tr>${dates('budget').map(date => `<th scope="col">${html(date)}</th>`).join('')}${dates('actual').map((date, index) => `<th scope="col"${index ? '' : ' class="entity-actual"'}>${html(date)}</th>`).join('')}</tr>
+        </thead>
+        <tbody>${balanceRows.map(row => rowHtml(row, { span: 5 })).join('')}</tbody>
+      </table></div>
     </section>${taxRows.length ? `
     <section class="panel entity-report" aria-labelledby="tax-heading">
       <div class="panel-header"><div><h2 id="tax-heading">US income tax</h2>

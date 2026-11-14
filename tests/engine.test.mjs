@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import {
   applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation, quarterly, unfilledDemand,
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig, US_TAX_RULES, usIncomeTax,
+  balanceSheets, FIXED_ASSETS, PAYMENT_TERMS, US_BONDS,
 } from '../src/engine.mjs'
 import { renderEntityDetail } from '../src/entity-view.mjs'
 import { entityWorkbook } from '../src/entity-export.mjs'
@@ -298,7 +299,8 @@ test('demand for a line made in one plant goes unmet once that plant is at its l
   const base = createConfig()
   const baseline = runYear(base).budget
   const units = lots => lots.reduce((sum, lot) => sum + lot.quantity, 0)
-  for (const [plant, family, limit, hub, other] of [['US', 'B', 1300, 'US', 'BE'], ['PL', 'C', 700, 'BE', 'US']]) {
+  // The Swiss warehouse also holds the limited-risk distributors' stock, so Poland's limit must be lower to run it out.
+  for (const [plant, family, limit, hub, other] of [['US', 'B', 1300, 'US', 'BE'], ['PL', 'C', 650, 'BE', 'US']]) {
     const config = { ...base, capacity: structuredClone(base.capacity) }
     config.capacity[plant][family] = limit
     const { budget, actual } = runYear(config)
@@ -336,10 +338,23 @@ test('a saved scenario that has not started takes the current default margin, an
   assert.equal(upgradeConfig({ ...structuredClone(saved), annualOperatingMargin: 0.25 }, false).annualOperatingMargin, 0.25)
 })
 
-test('a price change reaches a distributor\'s cost of sales only after its two months of stock are sold', () => {
+test('a price change reaches a full-fledged distributor\'s cost of sales only after its two months of stock are sold', () => {
   const config = createConfig()
   const base = runYear(config)
-  for (const [id, route] of [['DE', 'CH-DE'], ['FR', 'CH-FR'], ['UK', 'CH-UK'], ['APAC', 'CH-APAC'], ['CA', 'US-CA']]) {
+  // The limited-risk distributors hold no stock: the Swiss principal ships each order from its Belgian
+  // warehouse and sells it to them as it ships, so a new price reaches their cost of sales at once.
+  for (const [id, route] of [['DE', 'CH-DE'], ['FR', 'CH-FR'], ['UK', 'CH-UK']]) {
+    assert.ok(base.actual.every(month => month.inventory.filter(bin => bin.owner === id)
+      .every(bin => !bin.opening.length && !bin.closing.length)), id)
+    const current = reviewGoodsPricing(config, 3).routes.find(entry => entry.key === route).prices
+    const raised = Object.fromEntries(current.map(price => [price.product, cents(price.applied * 1.1)]))
+    const changed = runYear(applyGoodsPrices(config, 3, { [route]: raised }))
+    // The raised prices are rounded to the cent, so the rise is 10% to within a hundredth of a percent.
+    for (const month of [3, 4, 8]) {
+      assert.ok(Math.abs(changed.actual[month].entities[id].cogs / base.actual[month].entities[id].cogs - 1.1) < 1e-4, id)
+    }
+  }
+  for (const [id, route] of [['APAC', 'CH-APAC'], ['CA', 'US-CA']]) {
     // A distributor starts every month holding about two months of normal demand, bought at earlier prices.
     for (const family of Object.keys(PRODUCTS)) {
       const bin = base.actual[3].inventory.find(entry => entry.owner === id && entry.product === family)
@@ -856,7 +871,10 @@ test('the entity detail report adds up to each entity’s results, budget and ac
         const { products, adjustments, fees, other, total: costOfSales } = lines.costOfSales
         near(add(Object.values(products), line => line.amount) + adjustments + fees + other, add(results, result => result.cogs), `${label} cost of sales`)
         near(costOfSales, add(results, result => result.cogs), `${label} cost of sales total`)
-        near(add(lines.charges, line => line.amount) + lines.ownCosts + lines.ownResearch, add(results, result => result.operatingExpenses), `${label} operating expenses`)
+        // Depreciation is part of the entity's own costs, shown apart.
+        const depreciation = lines.depreciation.buildings + lines.depreciation.equipment
+        near(add(lines.charges, line => line.amount) + lines.ownCosts + depreciation + lines.ownResearch, add(results, result => result.operatingExpenses), `${label} operating expenses`)
+        near(depreciation, months.length * Object.values(FIXED_ASSETS[id]).reduce((sum, asset) => sum + asset.cost / asset.life / 12, 0), `${label} depreciation`)
         near(lines.revenue - costOfSales - lines.operatingExpenses, add(results, result => result.operatingProfit), `${label} operating profit`)
         assert.ok(lines.ownCosts > -0.005 && lines.ownResearch > -0.005, label)
         // Nothing is reported as an actual before a month is revealed.
@@ -909,24 +927,32 @@ test('the entity detail report shows service fees, the royalty and stock the way
 
   // The annual view sets the full-year budget beside actuals to date.
   const units = lines => lines.sales.reduce((sum, group) => sum + Object.values(group.products).reduce((count, line) => count + line.units, 0), 0)
-  const germany = report('DE', { basis: 'year', revealed: 3 })
-  assert.equal(germany.budget.months, 12)
-  assert.equal(germany.actual.months, 3)
-  assert.equal(units(germany.actual), [0, 1, 2].reduce((sum, period) => sum + units(report('DE', { basis: 'month', period, revealed: 3 }).actual), 0))
-  assert.deepEqual(germany.actual.inventory.closing, report('DE', { basis: 'month', period: 2, revealed: 3 }).actual.inventory.closing)
-  assert.deepEqual(germany.actual.inventory.opening, germany.budget.inventory.opening)
+  const asia = report('APAC', { basis: 'year', revealed: 3 })
+  assert.equal(asia.budget.months, 12)
+  assert.equal(asia.actual.months, 3)
+  assert.equal(units(asia.actual), [0, 1, 2].reduce((sum, period) => sum + units(report('APAC', { basis: 'month', period, revealed: 3 }).actual), 0))
+  assert.deepEqual(asia.actual.inventory.closing, report('APAC', { basis: 'month', period: 2, revealed: 3 }).actual.inventory.closing)
+  assert.deepEqual(asia.actual.inventory.opening, asia.budget.inventory.opening)
 
   // Stock is a balance. Before the year starts both ends are the opening stock. An unrevealed month has no ending stock yet.
-  const start = report('DE', { basis: 'year', revealed: 0 }).actual
+  const start = report('APAC', { basis: 'year', revealed: 0 }).actual
   assert.equal(start.revenue, 0)
   assert.deepEqual(start.inventory.closing, start.inventory.opening)
   assert.ok(start.inventory.opening.every(row => row.units > 0))
-  const next = report('DE', { basis: 'month', period: 3, revealed: 3 }).actual.inventory
-  assert.deepEqual(next.opening, germany.actual.inventory.closing)
+  const next = report('APAC', { basis: 'month', period: 3, revealed: 3 }).actual.inventory
+  assert.deepEqual(next.opening, asia.actual.inventory.closing)
   assert.equal(next.closing, null)
-  assert.deepEqual(report('DE', { basis: 'month', period: 5, revealed: 3 }).actual.inventory, { opening: null, closing: null })
-  // The service entities and the toll manufacturer hold no stock.
+  assert.deepEqual(report('APAC', { basis: 'month', period: 5, revealed: 3 }).actual.inventory, { opening: null, closing: null })
+  // The service entities and the toll manufacturer hold no stock. Nor do the limited-risk distributors:
+  // what they sell is shipped from the Swiss principal's stock and bought as it ships.
   for (const id of ['PL', 'BE', 'IN']) assert.deepEqual(report(id, { basis: 'year', revealed: 12 }).budget.inventory, { opening: [], closing: [] })
+  for (const id of ['DE', 'FR', 'UK']) {
+    const { budget, actual } = report(id, { basis: 'year', revealed: 12 })
+    for (const side of [budget, actual]) {
+      assert.ok([...side.inventory.opening, ...side.inventory.closing].every(row => row.units === 0), id)
+      for (const family of Object.keys(PRODUCTS)) assert.equal(side.received[family].units, side.costOfSales.products[family].units, id)
+    }
+  }
   assert.deepEqual(Object.keys(report('PL', { basis: 'month', period: 0, revealed: 1 }).actual.made), Object.keys(PRODUCTS))
 
   assert.throws(() => report('UNRELATED'), /legal entities/)
@@ -962,36 +988,44 @@ test('the entity detail report lists cost of sales and stock by first-in, first-
     }
   }
 
-  // Germany opens with two layers of Precision Components. January sells out of the older, cheaper one,
-  // so its cost per unit is below the average value of the stock it started with.
-  const january = entityDetail(config, year, 'DE', { basis: 'month', period: 0, revealed: 0 }).budget
+  // Asia, a full-fledged distributor, opens with two layers of Precision Components. January sells out of the
+  // older, cheaper one, so its cost per unit is below the average value of the stock it started with.
+  // Its layers carry the import duty: Asia is outside the European customs block.
+  const duty = 1 + config.customs.rates['APAC.EU'].A
+  const january = entityDetail(config, year, 'APAC', { basis: 'month', period: 0, revealed: 0 }).budget
   const opening = january.inventory.opening.find(row => row.product === 'A')
-  assert.deepEqual(opening.layers.map(layer => [layer.vintage, layer.source, layer.units]), [['2026-11', 'bought', 360], ['2026-12', 'bought', 360]])
+  assert.deepEqual(opening.layers.map(layer => [layer.vintage, layer.source, layer.units]), [['2026-11', 'bought', 430], ['2026-12', 'bought', 430]])
   const [older, newer] = each(opening.layers)
   assert.ok(older < newer)
   const sold = january.costOfSales.products.A
   assert.deepEqual(sold.layers.map(layer => layer.vintage), ['2026-11'])
   assert.deepEqual(each(sold.layers), [older])
   assert.ok(cents(sold.amount / sold.units) < cents(opening.amount / opening.units))
-  // What it buys in January comes in at January's transfer price and is still in stock at the end of the month.
+  // What it buys in January comes in at January's transfer price plus duty and is still in stock at the end of the month.
   assert.deepEqual(january.received.A.layers.map(layer => layer.vintage), ['2027-01'])
-  const price = reviewGoodsPricing(config, 0).routes.find(route => route.key === 'CH-DE').prices.find(entry => entry.product === 'A').applied
-  assert.deepEqual(each(january.received.A.layers), [cents(price)])
+  const price = reviewGoodsPricing(config, 0).routes.find(route => route.key === 'CH-APAC').prices.find(entry => entry.product === 'A').applied
+  assert.deepEqual(each(january.received.A.layers), [cents(price * duty)])
   assert.deepEqual(january.inventory.closing.find(row => row.product === 'A').layers.map(layer => layer.vintage), ['2026-11', '2026-12', '2027-01'])
 
   // A price raised at the March review shows in April's purchases at once, and in cost of sales only when that layer is reached.
-  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices
+  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-APAC').prices
   const raised = Object.fromEntries(current.map(entry => [entry.product, cents(entry.applied * 1.1)]))
-  const changedConfig = applyGoodsPrices(config, 3, { 'CH-DE': raised })
+  const changedConfig = applyGoodsPrices(config, 3, { 'CH-APAC': raised })
   const changed = runYear(changedConfig)
-  const month = period => entityDetail(changedConfig, changed, 'DE', { basis: 'month', period, revealed: 12 }).actual
-  assert.deepEqual(each(month(3).received.A.layers), [raised.A])
+  const month = period => entityDetail(changedConfig, changed, 'APAC', { basis: 'month', period, revealed: 12 }).actual
+  assert.deepEqual(each(month(3).received.A.layers), [cents(raised.A * duty)])
   assert.ok(month(3).costOfSales.products.A.layers.every(layer => layer.vintage < '2027-04'))
-  assert.ok(month(5).costOfSales.products.A.layers.some(layer => layer.vintage === '2027-04' && cents(layer.amount / layer.units) === raised.A))
+  assert.ok(month(5).costOfSales.products.A.layers.some(layer => layer.vintage === '2027-04' && cents(layer.amount / layer.units) === cents(raised.A * duty)))
   // The budget keeps the opening price, so the same layer shows both prices side by side.
-  const april = entityDetail(changedConfig, changed, 'DE', { basis: 'month', period: 3, revealed: 12 })
+  const april = entityDetail(changedConfig, changed, 'APAC', { basis: 'month', period: 3, revealed: 12 })
   assert.deepEqual(april.budget.received.A.layers.map(layer => layer.key), april.actual.received.A.layers.map(layer => layer.key))
-  assert.ok(each(april.budget.received.A.layers)[0] < raised.A)
+  assert.ok(each(april.budget.received.A.layers)[0] < cents(raised.A * duty))
+  // A limited-risk distributor buys as the goods ship to its customer, so a new price is its cost of sales at once.
+  const germanConfig = applyGoodsPrices(config, 3, { 'CH-DE': Object.fromEntries(reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices
+    .map(entry => [entry.product, cents(entry.applied * 1.1)])) })
+  const germanApril = entityDetail(germanConfig, runYear(germanConfig), 'DE', { basis: 'month', period: 3, revealed: 12 }).actual
+  assert.deepEqual(germanApril.costOfSales.products.A.layers.map(layer => layer.vintage), ['2027-04'])
+  assert.deepEqual(each(germanApril.costOfSales.products.A.layers), each(germanApril.received.A.layers))
 
   // An importer in another customs block carries the duty inside the layer's value.
   const asia = entityDetail(config, year, 'APAC', { basis: 'month', period: 2, revealed: 12 }).actual.received.A.layers
@@ -1116,8 +1150,8 @@ test('the entity detail report works by quarter and lists a quarter bought at on
     }
   }
 
-  // Germany pays one price all quarter, so each quarter's purchases are one layer. Its opening stock was bought at two prices.
-  const first = report('DE', { period: 0, revealed: 3 })
+  // Asia pays one price all quarter, so each quarter's purchases are one layer. Its opening stock was bought at two prices.
+  const first = report('APAC', { period: 0, revealed: 3 })
   for (const side of [first.budget, first.actual]) {
     assert.deepEqual(side.inventory.opening.find(row => row.product === 'A').layers.map(layer => layer.vintage), ['2026-11', '2026-12'])
     assert.deepEqual(side.received.A.layers.map(layer => [layer.vintage, layer.quarter]), [['2027-Q1', true]])
@@ -1127,30 +1161,36 @@ test('the entity detail report works by quarter and lists a quarter bought at on
   // The budget and the actuals list the same layers, so they share a row.
   assert.deepEqual(first.budget.costOfSales.products.A.layers.map(layer => layer.key), first.actual.costOfSales.products.A.layers.map(layer => layer.key))
 
+  // Germany holds no stock: each quarter it buys what it sells, as one layer at the quarter's price.
+  const german = report('DE', { period: 0, revealed: 3 }).actual
+  assert.deepEqual(german.costOfSales.products.A.layers.map(layer => layer.vintage), ['2027-Q1'])
+  assert.ok(german.inventory.closing.every(row => !row.units))
+
   // A quarter is zero until all three of its months are revealed. The next one to be revealed shows its opening stock.
-  const waiting = report('DE', { period: 1, revealed: 3 }).actual
+  const waiting = report('APAC', { period: 1, revealed: 3 }).actual
   assert.equal(waiting.revenue, 0)
   assert.deepEqual(waiting.inventory.opening, first.actual.inventory.closing)
   assert.equal(waiting.inventory.closing, null)
-  assert.equal(report('DE', { period: 1, revealed: 5 }).actual.revenue, 0)
-  assert.deepEqual(report('DE', { period: 2, revealed: 3 }).actual.inventory, { opening: null, closing: null })
-  assert.ok(report('DE', { period: 1, revealed: 6 }).actual.revenue > 0)
+  assert.equal(report('APAC', { period: 1, revealed: 5 }).actual.revenue, 0)
+  assert.deepEqual(report('APAC', { period: 2, revealed: 3 }).actual.inventory, { opening: null, closing: null })
+  assert.ok(report('APAC', { period: 1, revealed: 6 }).actual.revenue > 0)
 
   // A price raised at the first-quarter review is the second quarter's layer, beside the budgeted price.
   // About two-thirds of that quarter's units still come from the older layer.
-  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices
+  const duty = 1 + config.customs.rates['APAC.EU'].A
+  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-APAC').prices
   const raised = Object.fromEntries(current.map(entry => [entry.product, cents(entry.applied * 1.1)]))
-  const changedConfig = applyGoodsPrices(config, 3, { 'CH-DE': raised })
+  const changedConfig = applyGoodsPrices(config, 3, { 'CH-APAC': raised })
   const changed = runYear(changedConfig)
-  const second = entityDetail(changedConfig, changed, 'DE', { basis: 'quarter', period: 1, revealed: 6, layers: 'quarter' })
-  assert.deepEqual(each(second.actual.received.A.layers), [raised.A])
-  assert.ok(each(second.budget.received.A.layers)[0] < raised.A)
+  const second = entityDetail(changedConfig, changed, 'APAC', { basis: 'quarter', period: 1, revealed: 6, layers: 'quarter' })
+  assert.deepEqual(each(second.actual.received.A.layers), [cents(raised.A * duty)])
+  assert.ok(each(second.budget.received.A.layers)[0] < cents(raised.A * duty))
   assert.deepEqual(second.actual.received.A.layers.map(layer => layer.key), second.budget.received.A.layers.map(layer => layer.key))
   const sold = second.actual.costOfSales.products.A
   const atNewPrice = sold.layers.find(layer => layer.vintage === '2027-Q2').units / sold.units
   assert.ok(atNewPrice > 0.25 && atNewPrice < 0.45, String(atNewPrice))
-  const third = entityDetail(changedConfig, changed, 'DE', { basis: 'quarter', period: 2, revealed: 9, layers: 'quarter' })
-  assert.ok(third.actual.costOfSales.products.A.layers.every(layer => cents(layer.amount / layer.units) === raised.A))
+  const third = entityDetail(changedConfig, changed, 'APAC', { basis: 'quarter', period: 2, revealed: 9, layers: 'quarter' })
+  assert.ok(third.actual.costOfSales.products.A.layers.every(layer => cents(layer.amount / layer.units) === cents(raised.A * duty)))
 
   // The plants' cost moves every month, so their layers stay by month.
   const us = report('US', { period: 1, revealed: 12 }).actual.received
@@ -1158,7 +1198,7 @@ test('the entity detail report works by quarter and lists a quarter bought at on
   // What it buys from Switzerland comes at one price all quarter, so that is one layer.
   assert.deepEqual(us.C.layers.map(layer => [layer.source, layer.vintage]), [['bought', '2027-Q2']])
   // By month, the same report keeps a layer for every month.
-  assert.deepEqual(entityDetail(config, year, 'DE', { basis: 'quarter', period: 0, revealed: 3 }).actual.received.A.layers.map(layer => layer.vintage), ['2027-01', '2027-02', '2027-03'])
+  assert.deepEqual(entityDetail(config, year, 'APAC', { basis: 'quarter', period: 0, revealed: 3 }).actual.received.A.layers.map(layer => layer.vintage), ['2027-01', '2027-02', '2027-03'])
 })
 
 test('a service fee quoted by the quarter is charged a third each month', () => {
@@ -1183,9 +1223,11 @@ test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI
   for (const [months, stat] of [[budget, null], [actual, actual[11].stat], [actual.slice(0, 6), null]]) {
     const tax = usIncomeTax(config, months, stat)
     const us = add(months, month => month.entities.US.operatingProfit)
+    // Interest on the bonds, at the coupon for the months covered. It is deductible for state and federal tax.
+    near(tax.interest, US_BONDS.amount * US_BONDS.rate * months.length / 12, 'interest')
     // State tax at the rest of the US rate, deductible for federal purposes.
     near(tax.stateRate, config.tax.rates.US - 0.21, 'state rate')
-    near(tax.state, tax.stateRate * us, 'state')
+    near(tax.state, tax.stateRate * (us - tax.interest), 'state')
     // FDDEI: R&E is not allocated, so deduction eligible income is profit before R&D, less state tax.
     near(tax.fddei.dei, us + add(months, month => month.entities.US.rdExpense) - tax.state, 'DEI')
     near(tax.fddei.receipts, add(months, month => month.entities.US.revenue), 'gross receipts')
@@ -1203,12 +1245,14 @@ test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI
     assert.ok(tax.ncti.excessCredit > 0)
     near(tax.ncti.residual, 0, 'residual')
     // Taxable income and regular tax.
-    near(tax.taxableIncome, us - tax.state + tax.ncti.amount + tax.ncti.grossUp - tax.fddei.deduction - tax.ncti.deduction, 'taxable income')
+    near(tax.taxableIncome, us - tax.interest - tax.state + tax.ncti.amount + tax.ncti.grossUp - tax.fddei.deduction - tax.ncti.deduction, 'taxable income')
     near(tax.regularTax, 0.21 * tax.taxableIncome - tax.ncti.credit, 'regular tax')
     // BEAT: the R&D services in full and India's markup are base erosion payments. India's cost is excepted.
     near(tax.beat.research, add(months, month => month.transactions.filter(line => line.policy === 'RD_SERVICES').reduce((sum, line) => sum + line.amount, 0)), 'R&D services')
     near(tax.beat.indiaMarkup, tax.beat.indiaFee - tax.beat.indiaCost, 'India markup')
     near(tax.beat.percentage, tax.beat.benefits / tax.beat.deductions, 'base erosion percentage')
+    // Interest to the outside bondholders counts among the deductions but is not a base erosion payment.
+    near(tax.beat.deductions, add(months, month => month.entities.US.operatingExpenses) + tax.interest + tax.state - tax.beat.indiaCost, 'BEAT deductions')
     // Gross receipts are in USD thousands and annualized for a part year. The parent is well above $500 million.
     near(tax.beat.grossReceipts, add(months, month => month.entities.US.revenue) * 12 / add(months, month => month.months?.length ?? 1), 'gross receipts test')
     assert.ok(tax.beat.grossReceiptsMet)
@@ -1275,11 +1319,18 @@ test('the entity detail report carries the US tax computation for the United Sta
   // (The fourth row was once drawn with three, because Array.map passed its index as the column count.)
   for (const basis of ['quarter', 'year']) {
     const report = renderEntityDetail({ detail: entityDetail(config, year, 'US', { basis, period: 0, revealed: 12 }), entities: ['US', 'DE'] })
-    const main = report.slice(0, report.indexOf('entity-tax-table'))
+    const main = report.slice(0, report.indexOf('entity-balance-table'))
     const lines = [...main.matchAll(/<tr class="entity-(?:line|subtotal|total|layer)">([\s\S]*?)<\/tr>/g)]
     assert.ok(lines.length > 20)
     for (const [, cells] of lines) assert.equal((cells.match(/<td>/g) ?? []).length, 6, cells.slice(0, 120))
     assert.ok(![...main.slice(main.indexOf('<tbody>')).matchAll(/colspan="(\d+)"/g)].some(([, span]) => span !== '7'))
+    // The balance sheet has a start and an end on each side.
+    const balance = report.slice(report.indexOf('entity-balance-table'), report.indexOf('entity-tax-table'))
+    const balances = [...balance.matchAll(/<tr class="entity-(?:line|subtotal|total)">([\s\S]*?)<\/tr>/g)]
+    assert.ok(balances.length > 15)
+    for (const [, cells] of balances) assert.equal((cells.match(/<td>/g) ?? []).length, 4, cells.slice(0, 120))
+    assert.ok(![...balance.slice(balance.indexOf('<tbody>')).matchAll(/colspan="(\d+)"/g)].some(([, span]) => span !== '5'))
+    assert.ok(balance.includes('Total liabilities and equity') && balance.includes('Return on assets'))
   }
   // The computation has its own table with one amount column a side, so it reads on a phone.
   const page = renderEntityDetail({ detail: us, entities: ['US', 'DE'] })
@@ -1353,4 +1404,129 @@ test('the page loads every code and style file by its fingerprint, so a reload a
   assert.equal(page, stamp(page, fingerprints()), 'index.html fingerprints are out of date')
   assert.ok(page.indexOf('type="importmap"') < page.indexOf('type="module"'), 'the import map comes before the first module')
   assert.ok(!/src="\.\/src\/[\w-]+\.mjs"/.test(page) && !/href="\.\/src\/[\w-]+\.css"/.test(page))
+})
+
+test('every entity has a balance sheet that balances, with cash that ties to collections and payments on the payment terms', () => {
+  const config = applyYearEndAdjustments(createConfig(), 12, Object.fromEntries(TESTED_PARTIES.map(id => [id, 'target'])))
+  const year = runYear(config)
+  const sheets = balanceSheets(config, year)
+  const companies = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)
+  const near = (left, right, label, tolerance = 0.005) => assert.ok(Math.abs(left - right) < tolerance, `${label}: ${left} against ${right}`)
+  // The flows of one month from the journal, entity by entity: sales and purchases with outsiders and with group companies.
+  const flowsOf = month => Object.fromEntries(companies.map(id => {
+    const lines = month.journal.filter(line => line.entity === id)
+    const net = account => lines.filter(line => line.account === account).reduce((sum, line) => sum + line.debit - line.credit, 0)
+    const depreciation = Object.values(FIXED_ASSETS[id]).reduce((sum, asset) => sum + asset.cost / asset.life / 12, 0)
+    const thirdPartySales = -net('externalRevenue')
+    return [id, {
+      thirdPartySales, relatedSales: net('intercompanyReceivable'), relatedPurchases: -net('intercompanyPayable'),
+      thirdPartyPurchases: thirdPartySales - net('externalClearing') - depreciation,
+    }]
+  }))
+  for (const side of ['budget', 'actual']) {
+    const months = year[side]
+    const flows = [flowsOf(year.budget[0]), flowsOf(year.budget[0]), ...months.map(flowsOf)]
+    // flows[1] stands for last December and flows[0] for last November: both look like the budgeted January.
+    const at = month => flows[month + 1]
+    for (const id of companies) {
+      const opening = sheets[side][0][id]
+      let collected = 0
+      for (let month = 0; month <= 12; month++) {
+        const sheet = sheets[side][month][id]
+        const label = `${side} ${id} month ${month}`
+        near(sheet.assets, sheet.liabilities + sheet.equity, `${label} balances`)
+        assert.ok(sheet.cash > 0, label)
+        // Third parties pay in 60 days and group companies in 30. Balances that change sign sit on the other side.
+        const open = (key, count) => Array.from({ length: count }, (_, back) => at(month - back)[id][key]).reduce((sum, value) => sum + value, 0)
+        near(sheet.receivables.total - sheet.payables.total,
+          open('thirdPartySales', PAYMENT_TERMS.thirdParty.months) + open('relatedSales', PAYMENT_TERMS.related.months)
+          - open('thirdPartyPurchases', PAYMENT_TERMS.thirdParty.months) - open('relatedPurchases', PAYMENT_TERMS.related.months), `${label} terms`)
+        if (month) {
+          // Cash from what was actually collected and paid in the month, with no use of the income statement.
+          collected += at(month - 2)[id].thirdPartySales + at(month - 1)[id].relatedSales
+            - at(month - 2)[id].thirdPartyPurchases - at(month - 1)[id].relatedPurchases
+            - (id === 'US' ? US_BONDS.amount * US_BONDS.rate / 12 : 0)
+          near(sheet.cash, opening.cash + collected, `${label} cash`, 0.01)
+          // Stock on the balance sheet is the stock the entity owns.
+          const owned = months[month - 1].inventory.filter(bin => bin.owner === id)
+            .reduce((sum, bin) => sum + bin.closing.reduce((value, lot) => value + lot.quantity * lot.unitValue, 0), 0)
+          near(sheet.inventory, owned, `${label} inventory`)
+        }
+        // Income tax is accrued on the year to date and paid after the year end.
+        const taxes = month ? summarizeTaxAndCustoms(config, months.slice(0, month)).tax.entities[id].tax : 0
+        if (month < 12) near(sheet.taxPayable, taxes, `${label} tax payable`)
+      }
+      const end = sheets[side][12][id]
+      // Equity grows by profit after tax. The bonds do not move.
+      const profit = months.reduce((sum, month) => sum + month.entities[id].operatingProfit, 0) - (id === 'US' ? US_BONDS.amount * US_BONDS.rate : 0)
+      near(end.equity, opening.equity + profit - end.taxPayable, `${side} ${id} equity`)
+      near(end.bonds, opening.bonds, `${side} ${id} bonds`)
+    }
+    // What group companies owe each other nets to nothing.
+    for (let month = 0; month <= 12; month++) {
+      const all = companies.map(id => sheets[side][month][id])
+      near(all.reduce((sum, sheet) => sum + sheet.receivables.related - sheet.payables.related, 0), 0, `${side} month ${month} intercompany`)
+    }
+  }
+  // The full year's actual tax follows local statutory profit.
+  near(sheets.actual[12].DE.taxPayable, config.tax.rates.DE * year.actual[11].stat.DE.operatingProfit, 'statutory tax')
+
+  // The opening balance sheet follows the assumptions.
+  const opening = sheets.budget[0]
+  const sales = id => year.budget.reduce((sum, month) => sum + month.entities[id].revenue, 0)
+  const share = (value, id) => value / sales(id)
+  const us = FIXED_ASSETS.US
+  near(share(us.buildings.net, 'US'), 0.20, 'US land and buildings', 0.005)
+  near(share(us.buildings.cost / us.buildings.life, 'US'), 0.01, 'US buildings depreciation', 0.0005)
+  near(share(us.equipment.net, 'US'), 0.25, 'US machinery', 0.005)
+  near(share(us.equipment.cost / us.equipment.life, 'US'), 0.02, 'US machinery depreciation', 0.0005)
+  near(opening.US.bonds / opening.US.equity, 0.30, 'US bonds to equity', 0.005)
+  // Poland's plant is sized on capacity, not on its fee, so its assets are far larger than its sales.
+  assert.ok(opening.PL.fixedAssets.net > 2 * sales('PL'))
+  for (const id of ['CH', 'BE', 'DE', 'FR', 'UK', 'APAC', 'CA', 'IN']) assert.equal(FIXED_ASSETS[id].buildings, undefined, id)
+  for (const id of ['DE', 'FR', 'UK', 'APAC', 'CA']) assert.ok(share(opening[id].fixedAssets.net, id) < 0.05, id)
+  // The limited-risk distributors hold no stock; the full-fledged ones about two months of cost of sales.
+  for (const id of ['DE', 'FR', 'UK']) assert.equal(opening[id].inventory, 0, id)
+  for (const id of ['APAC', 'CA']) {
+    const cogs = year.budget.reduce((sum, month) => sum + month.entities[id].cogs, 0)
+    near(opening[id].inventory / (cogs / 12), 2, id, 0.25)
+  }
+})
+
+test('the entity report shows depreciation, interest and tax on the year-to-date basis, and its balance sheet and ratios', () => {
+  const config = createConfig()
+  const year = runYear(config)
+  const near = (left, right, label, tolerance = 0.005) => assert.ok(Math.abs(left - right) < tolerance, `${label}: ${left} against ${right}`)
+  for (const id of Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)) {
+    const annual = entityDetail(config, year, id, { basis: 'year', revealed: 12 })
+    const quarters = [0, 1, 2, 3].map(period => entityDetail(config, year, id, { basis: 'quarter', period, revealed: 12 }))
+    for (const side of ['budget', 'actual']) {
+      const lines = annual[side]
+      // The quarters add up to the year, tax included, and each quarter starts where the last one ended.
+      near(quarters.reduce((sum, quarter) => sum + quarter[side].tax.total, 0), lines.tax.total, `${id} ${side} tax`)
+      near(quarters.reduce((sum, quarter) => sum + quarter[side].profitAfterTax, 0), lines.profitAfterTax, `${id} ${side} profit after tax`)
+      for (let quarter = 1; quarter < 4; quarter++) assert.deepEqual(quarters[quarter][side].balance.start, quarters[quarter - 1][side].balance.end)
+      assert.deepEqual(quarters[3][side].balance.end, lines.balance.end)
+      near(lines.balance.end.equity, lines.balance.start.equity + lines.profitAfterTax, `${id} ${side} equity`)
+      near(lines.profitBeforeTax, lines.operatingProfit - lines.interest, `${id} ${side} profit before tax`)
+      // Return on assets is operating profit over the average of total assets at the start and the end.
+      near(lines.ratios.returnOnAssets, lines.operatingProfit / ((lines.balance.start.assets + lines.balance.end.assets) / 2), `${id} ${side} ROA`, 1e-12)
+      // A quarter is annualized.
+      const q = quarters[1][side]
+      near(q.ratios.returnOnAssets, q.operatingProfit * 4 / ((q.balance.start.assets + q.balance.end.assets) / 2), `${id} ${side} quarterly ROA`, 1e-12)
+      // Outside the United States, tax for a quarter is the rate on operating profit, until the year end brings in local statutory profit.
+      if (id !== 'US') {
+        for (const quarter of side === 'actual' ? [0, 1, 2] : [0, 1, 2, 3]) near(quarters[quarter][side].tax.adjustment, 0, `${id} ${side} Q${quarter + 1} adjustment`)
+        near(lines.tax.base, config.tax.rates[id] * lines.operatingProfit, `${id} ${side} tax at the rate`)
+      }
+    }
+  }
+  // Only the United States pays interest.
+  const us = entityDetail(config, year, 'US', { basis: 'year', revealed: 12 }).budget
+  near(us.interest, US_BONDS.amount * US_BONDS.rate, 'interest')
+  near(us.tax.total, us.usTax.total, 'US tax')
+  assert.equal(entityDetail(config, year, 'DE', { basis: 'year', revealed: 12 }).budget.interest, 0)
+  // Before a quarter is revealed its actual balance sheet has no end, and no ratios.
+  const waiting = entityDetail(config, year, 'APAC', { basis: 'quarter', period: 1, revealed: 3 }).actual
+  assert.ok(waiting.balance.start && !waiting.balance.end && waiting.ratios === null && waiting.tax === null)
 })

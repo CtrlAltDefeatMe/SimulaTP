@@ -70,6 +70,13 @@ const plantFor = (family, hub) => makes(HUB_PLANT[hub], family) ? HUB_PLANT[hub]
 // Whether a hub makes a line itself or buys it from the other hub.
 const hubMakes = (hub, family) => makes(HUB_PLANT[hub], family)
 const LRD = new Set(['DE', 'FR', 'UK'])
+// Months of their own base demand the distributors hold in stock. The limited-risk
+// distributors hold none: the Swiss principal keeps their stock in the Belgian warehouse
+// and ships each order straight to the customer, selling to the distributor as it ships.
+// It holds the two months the distributors would otherwise keep, on top of its own stock.
+const DISTRIBUTOR_STOCK_MONTHS = { lrd: 0, ffd: 2 }
+const PRINCIPAL_LRD_STOCK_MONTHS = 2
+const stockMonths = id => DISTRIBUTOR_STOCK_MONTHS[LRD.has(id) ? 'lrd' : 'ffd']
 const ALL_COMPANIES = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)
 // Poland and India charge a fixed monthly fee and are tested on their markup on cost.
 const SERVICE_PROVIDERS = ['PL', 'IN']
@@ -91,11 +98,12 @@ const ZERO_SHOCK = { demand: 0, salesPrice: 0, materialCost: 0 }
 const DEFAULT_RD_RATE = 0.04
 // The default budget before R&D, less R&D at its default share of sales. Keeping the
 // target equal to the uncalibrated budget leaves the base unit costs unscaled.
-const DEFAULT_ANNUAL_MARGIN = 2_281_724.4253404764 / 10_487_570 - DEFAULT_RD_RATE
-// Defaults of earlier versions: before each product line was given its own plant, before
-// plant capacity was cut to about a normal month's output, before customs duty entered
-// cost of sales, and before unit costs and operating expenses were raised.
-const PREVIOUS_DEFAULT_MARGINS = [2_282_638.939772495, 2_287_230.2960874448, 2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
+const DEFAULT_ANNUAL_MARGIN = 2_279_906.539063561 / 10_487_570 - DEFAULT_RD_RATE
+// Defaults of earlier versions: before the limited-risk distributors' stock moved to the
+// Swiss principal, before each product line was given its own plant, before plant capacity
+// was cut to about a normal month's output, before customs duty entered cost of sales, and
+// before unit costs and operating expenses were raised.
+const PREVIOUS_DEFAULT_MARGINS = [2_281_724.4253404764, 2_282_638.939772495, 2_287_230.2960874448, 2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
   .map(profit => profit / 10_487_570 - DEFAULT_RD_RATE)
 // Units a month for each product line a plant makes. Each is a little above a normal
 // month's output, so a plant runs at its limit in the busier months and draws on stock.
@@ -112,6 +120,46 @@ const POLICY_KINDS = {
   toll: { target: 'polandMarkup', label: 'Poland toll' }, services: { target: 'indiaServicesMarkup', label: 'India services' },
 }
 const policyKind = id => id === 'PL' ? 'toll' : id === 'IN' ? 'services' : LRD.has(id) ? 'lrd' : 'ffd'
+// Fixed assets at 1 January 2027, USD thousands: cost and net book value by class, and the
+// useful life in years over which cost is depreciated, straight line. They are sized on the
+// default budget. The US parent's land and buildings are 20% of its net sales, net, and
+// depreciate by 1% of sales a year (a 40-year life); its machinery and equipment are 25%
+// of sales, net, and depreciate by 2% (20 years). Poland's sales are only its toll fee, so
+// its plant is sized like the US plant instead, scaled by capacity at conversion cost: 20%
+// larger. The others own no land or buildings: office equipment of about 3% of sales for
+// the distributors, 1% for the Swiss principal and 10% for India, and warehouse equipment
+// of 35% of its fee for Belgium, which leases its building. Half of their cost is depreciated.
+// Depreciation is part of each entity's operating costs: it is shown as its own line, worked
+// out from these assets, and the rest of the costs are shown without it.
+export const FIXED_ASSET_CLASSES = { buildings: 'Land and buildings', equipment: 'Machinery and equipment' }
+export const FIXED_ASSETS = {
+  US: { buildings: { cost: 2_038_000, net: 1_019_000, life: 40 }, equipment: { cost: 2_038_000, net: 1_274_000, life: 20 } },
+  CH: { equipment: { cost: 126_000, net: 63_000, life: 5 } },
+  PL: { buildings: { cost: 2_450_000, net: 1_225_000, life: 40 }, equipment: { cost: 2_450_000, net: 1_531_000, life: 20 } },
+  BE: { equipment: { cost: 142_000, net: 71_000, life: 10 } },
+  DE: { equipment: { cost: 103_000, net: 51_000, life: 5 } },
+  FR: { equipment: { cost: 77_000, net: 39_000, life: 5 } },
+  UK: { equipment: { cost: 78_000, net: 39_000, life: 5 } },
+  APAC: { equipment: { cost: 103_000, net: 51_000, life: 5 } },
+  CA: { equipment: { cost: 58_000, net: 29_000, life: 5 } },
+  IN: { equipment: { cost: 36_000, net: 18_000, life: 4 } },
+}
+// Customers pay in 60 days and group companies in 30, and so does everyone for what they buy:
+// two months and one month of the engine's monthly flows.
+export const PAYMENT_TERMS = { thirdParty: { days: 60, months: 2 }, related: { days: 30, months: 1 } }
+// The US parent's bonds, held by outside investors: about 30% of its equity at the start of
+// the year, at a fixed coupon. There are no loans between group companies.
+export const US_BONDS = { amount: 690_000, rate: 0.05 }
+// Each entity holds about a month of its budgeted revenue in cash at the start of the year.
+const OPENING_CASH_MONTHS = 1
+const monthlyDepreciation = (id, kind) => {
+  const asset = FIXED_ASSETS[id]?.[kind]
+  return asset ? asset.cost / asset.life / 12 : 0
+}
+const depreciationOf = id => monthlyDepreciation(id, 'buildings') + monthlyDepreciation(id, 'equipment')
+// Interest on the bonds for a number of months.
+const bondInterest = months => US_BONDS.amount * US_BONDS.rate * months / 12
+
 // Illustrative statutory income tax rates. They are scenario assumptions, not tax advice.
 // The US rate is the federal 21% plus state tax.
 const DEFAULT_TAX_RATES = { US: 0.25, CH: 0.15, PL: 0.19, BE: 0.25, DE: 0.30, FR: 0.25, UK: 0.25, APAC: 0.17, CA: 0.265, IN: 0.25 }
@@ -565,7 +613,8 @@ function seedOpeningStock(costScale, config) {
   const stock = new Stock()
   for (const family of FAMILIES) {
     const product = PRODUCTS[family]
-    for (const market of DISTRIBUTORS) {
+    // The full-fledged distributors open with two months of stock. The limited-risk ones hold none.
+    for (const market of DISTRIBUTORS.filter(id => stockMonths(id))) {
       const cost = hubGroupCost(sourceOf(market), family, config, history) * costScale
       const tp = distributorLandedCost(product, market, historical)
       const bin = stock.bin(market, market, family)
@@ -582,11 +631,11 @@ function seedOpeningStock(costScale, config) {
     // Each hub opens with its usual stock. Of a line its own plant makes, that is four
     // months of its markets' demand in the Swiss warehouse and one month in the United
     // States, carried at what the plant charged. Of a line it buys from the other hub, it
-    // is one month, carried at the cross-supply price plus the duty paid on it.
-    const opening = (hub, factor, month) => {
+    // is one month, carried at the cross-supply price plus the duty paid on it. The Swiss
+    // warehouse also holds two months of the limited-risk distributors' demand.
+    const opening = (hub, factor, month, units) => {
       const material = product.material * costScale * factor
       const vintage = '2026-' + String(month).padStart(2, '0')
-      const units = sum(hubMarkets(hub).map(id => product.demand[id]))
       const origin = plannedOrigin(family, hub)
       if (hubMakes(hub, family)) {
         const group = baseGroupCost(product, HUB_PLANT[hub]) * costScale * factor
@@ -601,9 +650,14 @@ function seedOpeningStock(costScale, config) {
     }
     for (const hub of HUBS) {
       // One lot for each month of stock, the older ones bought or made a little cheaper.
-      const months = bufferMonths(hub, family)
+      const own = sum(hubMarkets(hub).map(id => product.demand[id]))
+      const lrd = hub === 'CH' ? sum([...LRD].map(id => product.demand[id])) : 0
+      const lrdMonths = hub === 'CH' ? PRINCIPAL_LRD_STOCK_MONTHS : 0
+      const months = Math.max(bufferMonths(hub, family), lrdMonths)
+      // `age` is 0 for December, 1 for November and so on.
+      const units = age => (age < bufferMonths(hub, family) ? own : 0) + (age < lrdMonths ? lrd : 0)
       stock.bin(hub, hub === 'CH' ? 'BE' : 'US', family).lots = [0.96, 0.98, 0.99, 1].slice(-months).map((factor, index) =>
-        opening(hub, factor, 12 - months + 1 + index))
+        opening(hub, factor, 12 - months + 1 + index, units(months - 1 - index)))
     }
     // Poland holds materials and work in process only for the lines it converts.
     if (!makes('PL', family)) continue
@@ -705,7 +759,9 @@ function allocate(requests, available) {
 // line its own plant makes. A line bought from the other hub is held for one month.
 const HUB_BUFFER_MONTHS = { US: 1, CH: 4 }
 const bufferMonths = (hub, family) => hubMakes(hub, family) ? HUB_BUFFER_MONTHS[hub] : 1
+// The Swiss warehouse also holds the limited-risk distributors' stock.
 const hubBuffer = (hub, family) => bufferMonths(hub, family) * sum(hubMarkets(hub).map(id => PRODUCTS[family].demand[id]))
+  + (hub === 'CH' ? PRINCIPAL_LRD_STOCK_MONTHS * sum([...LRD].map(id => PRODUCTS[family].demand[id])) : 0)
 
 // What each plant makes in the month and what the hubs ship to each other, by product line.
 // A plant cannot make more of a line than its capacity for that line. A line made in one
@@ -723,7 +779,7 @@ function monthPlan(stock, month, shocks, config) {
     const warehouse = stock.bin('CH', 'BE', family)
     const bins = { US: us, CH: warehouse }
     const orders = Object.fromEntries(DISTRIBUTORS.map(id => [
-      id, Math.max(0, demand[id] + 2 * product.demand[id] - unitsOf(stock.bin(id, id, family).lots)),
+      id, Math.max(0, demand[id] + stockMonths(id) * product.demand[id] - unitsOf(stock.bin(id, id, family).lots)),
     ]))
     // What each hub's markets want from it this month, and what it needs to receive to
     // serve them and end the month on its usual stock.
@@ -1101,8 +1157,9 @@ const CFCS = ALL_COMPANIES.filter(id => id !== 'US')
  * tax year: federal tax at 21% with the section 250 deductions for FDDEI and NCTI, the
  * deemed-paid credit on NCTI and the BEAT, plus state tax at the rest of its rate.
  * `stat` holds the year's local statutory results once the year is closed: the CFCs'
- * foreign taxes follow them. Taxable income is taken to equal US GAAP operating profit,
- * with no interest, no NOLs and no credits other than the NCTI credit.
+ * foreign taxes follow them. Taxable income starts from US GAAP operating profit less the
+ * interest on the US parent's bonds, with no NOLs and no credits other than the NCTI credit.
+ * The interest is well inside the section 163(j) limit of 30% of adjusted taxable income.
  */
 export function usIncomeTax(config, months, stat = null) {
   const rules = US_TAX_RULES
@@ -1112,9 +1169,12 @@ export function usIncomeTax(config, months, stat = null) {
   const find = (policy, from, to) => lines.filter(line => line.policy === policy && line.from === from && line.to === to)
   const total = (list, key = 'amount') => sum(list.map(line => line[key] ?? 0))
 
-  // State tax, on US operating profit. It is deductible for federal purposes.
+  // Interest on the bonds for the months covered, deductible for state and federal tax.
+  const monthsCovered = sum(months.map(month => month.months?.length ?? 1))
+  const interest = bondInterest(monthsCovered)
+  // State tax, on US operating profit less the interest. It is deductible for federal purposes.
   const stateRate = Math.max(0, taxRate(config, 'US') - rules.federalRate)
-  const state = stateRate * Math.max(0, us.operatingProfit)
+  const state = stateRate * Math.max(0, us.operatingProfit - interest)
 
   // Gross receipts by kind. Sales to Canada and Switzerland are resold to unrelated
   // customers abroad, the royalty is for foreign use of the IP, and the headquarters
@@ -1134,7 +1194,7 @@ export function usIncomeTax(config, months, stat = null) {
   const otherCogs = us.cogs - domestic.cogs - goods.cogs
 
   // FDDEI: foreign-derived gross income less the deductions properly allocable to it,
-  // other than interest and R&E. Headquarters services cost is allocated to the fee it
+  // other than interest and R&E, which are not allocated to it. Headquarters services cost is allocated to the fee it
   // earns. Other operating expenses and state tax are apportioned on gross receipts.
   const apportioned = us.otherOperatingExpenses - services.cost + state
   const foreignShare = receipts + otherReceipts > 0 ? foreignReceipts / (receipts + otherReceipts) : 0
@@ -1163,7 +1223,7 @@ export function usIncomeTax(config, months, stat = null) {
 
   // Section 250, limited to taxable income: where FDDEI and NCTI with its gross-up exceed
   // taxable income before the deduction, both are cut back in proportion.
-  const beforeDeduction = us.operatingProfit - state + ncti + grossUp
+  const beforeDeduction = us.operatingProfit - interest - state + ncti + grossUp
   const claimed = fddeiBase + ncti + grossUp
   const limitShare = claimed > 0 ? Math.min(1, Math.max(0, beforeDeduction) / claimed) : 1
   const fddeiAllowed = fddeiBase * limitShare
@@ -1191,11 +1251,11 @@ export function usIncomeTax(config, months, stat = null) {
   const indiaMarkup = Math.max(0, total(india) - indiaCost + total(find('SERVICE_TRUE_UP', 'IN', 'US')))
   const baseErosionBenefits = research + indiaMarkup
   // The base erosion percentage compares them with all deductions, leaving out cost of
-  // goods sold, the section 250 deduction and the excepted service cost.
-  const deductions = us.otherOperatingExpenses + us.rdExpense + state - indiaCost
+  // goods sold, the section 250 deduction and the excepted service cost. Interest paid to
+  // the outside bondholders is a deduction but not a base erosion payment.
+  const deductions = us.otherOperatingExpenses + us.rdExpense + interest + state - indiaCost
   const baseErosionPercentage = deductions > 0 ? baseErosionBenefits / deductions : 0
   // The test averages three prior years. The model has one, so it takes this one, scaled to a full year.
-  const monthsCovered = sum(months.map(month => month.months?.length ?? 1))
   const grossReceipts = monthsCovered ? us.revenue * 12 / monthsCovered : 0
   const grossReceiptsMet = grossReceipts >= rules.beatGrossReceipts
   const beatApplies = grossReceiptsMet && baseErosionPercentage >= rules.beatThreshold
@@ -1204,7 +1264,7 @@ export function usIncomeTax(config, months, stat = null) {
   const beat = beatApplies ? Math.max(0, minimumTax - regularTax) : 0
 
   return {
-    operatingProfit: us.operatingProfit, stateRate, state,
+    operatingProfit: us.operatingProfit, interest, stateRate, state,
     fddei: {
       goods: goods.receipts, adjustment, royalty, services: services.receipts, foreignReceipts, receipts: receipts + otherReceipts,
       foreignShare, goodsCogs: goods.cogs, servicesCost: services.cost, apportioned, apportionedToForeign: foreignShare * apportioned,
@@ -1994,6 +2054,8 @@ function entityLines(config, id, months, budgetServiceCost, index) {
   }
   const paid = charges.get('CH_ROYALTY/operatingExpenses')
   const earned = otherRevenue.get('CH_ROYALTY')
+  const depreciation = Object.fromEntries(Object.keys(FIXED_ASSET_CLASSES).map(kind => [kind, monthlyDepreciation(id, kind) * months.length]))
+  const interest = id === 'US' ? bondInterest(months.length) : 0
   return {
     months: months.length,
     sales: [...sales.values()].sort((left, right) => Number(right.external) - Number(left.external)),
@@ -2004,9 +2066,12 @@ function entityLines(config, id, months, budgetServiceCost, index) {
       other: results.cogs - costOfGoods - adjustmentCost - charged('cogs'), total: results.cogs,
     },
     charges: chargeLines.filter(line => line.account !== 'cogs'),
-    ownCosts: results.otherOperatingExpenses - charged('operatingExpenses'),
+    // Depreciation is part of the entity's own operating costs. It is shown apart, worked out from its fixed assets.
+    ownCosts: results.otherOperatingExpenses - charged('operatingExpenses') - depreciation.buildings - depreciation.equipment,
+    depreciation,
     ownResearch: results.rdExpense - charged('rdExpense'),
     operatingExpenses: results.operatingExpenses, operatingProfit: results.operatingProfit,
+    interest, profitBeforeTax: results.operatingProfit - interest,
     // The royalty is a rate on the third-party sales of the Swiss principal and its limited-risk distributors.
     royalty: paid || earned ? {
       direction: paid ? 'paid' : 'earned', rate: config.policies.royaltyRate, base: paid ? paid.base : earned.cost, amount: (paid ?? earned).amount,
@@ -2054,10 +2119,156 @@ export function entityDetail(config, { budget, actual }, id, { basis = 'month', 
       actualLines.inventory = { opening: start ? stockOf(actual[start - 1].inventory, id, 'closing', ranks.actual) : yearOpening, closing: null }
     } else actualLines.inventory = { opening: null, closing: null }
   }
-  return {
-    id, basis, period, revealed,
-    budget: entityLines(config, id, basis === 'year' ? budget : budget.slice(start, start + span), budgetServiceCost, ranks.budget), actual: actualLines,
+  const budgetLines = entityLines(config, id, basis === 'year' ? budget : budget.slice(start, start + span), budgetServiceCost, ranks.budget)
+  // Balance sheets at the start and the end of the period. An end of the actuals not revealed yet is null.
+  const sheets = balanceSheets(config, { budget, actual })
+  const ends = {
+    budget: [basis === 'year' ? 0 : start, basis === 'year' ? 12 : start + span],
+    actual: basis === 'year' ? [0, revealed] : [start <= revealed ? start : null, start + span <= revealed ? start + span : null],
   }
+  for (const [side, lines] of [['budget', budgetLines], ['actual', actualLines]]) {
+    const [from, to] = ends[side]
+    const at = index => index === null ? null : sheets[side][index][id]
+    lines.balance = { start: at(from), end: at(to) }
+    lines.tax = periodTax(config, id, lines, lines.balance)
+    lines.profitAfterTax = lines.profitBeforeTax - (lines.tax?.total ?? 0)
+    lines.ratios = ratiosOf(id, lines)
+  }
+  return { id, basis, period, revealed, budget: budgetLines, actual: actualLines }
+}
+
+// Income tax for a period on the year-to-date basis: the tax on the year to its end, less the
+// tax on the year to its start. The balance sheet carries the year-to-date tax as a liability,
+// so this is what makes it roll forward. `base` is the tax worked out on the period alone: the
+// rate on operating profit, or for the United States its full computation. What is left is
+// `adjustment`: the true-up to local statutory profit at the year end, and for the United
+// States the effect of working out its limits and tests on the year to date.
+function periodTax(config, id, lines, { start, end }) {
+  if (!start || !end) return null
+  const total = end.taxPayable - start.taxPayable
+  const base = id === 'US' ? lines.usTax.total : taxRate(config, id) * lines.operatingProfit
+  return { rate: id === 'US' ? null : taxRate(config, id), base, adjustment: total - base, total }
+}
+
+// Return on assets and the other balance sheet ratios for a period, annualized. Operating
+// assets leave out cash. Averages are of the balances at the start and the end of the period.
+function ratiosOf(id, lines) {
+  const { start, end } = lines.balance
+  if (!start || !end || !lines.months) return null
+  const year = 12 / lines.months
+  const average = pick => (pick(start) + pick(end)) / 2
+  const operating = sheet => sheet.receivables.total + sheet.inventory + sheet.fixedAssets.net
+  const days = (balance, flow) => flow > 0 ? balance / flow * lines.months * 365 / 12 : NaN
+  return {
+    returnOnAssets: lines.operatingProfit * year / average(sheet => sheet.assets),
+    returnOnOperatingAssets: lines.operatingProfit * year / average(operating),
+    assetTurnover: lines.revenue * year / average(sheet => sheet.assets),
+    receivableDays: days(end.receivables.total, lines.revenue),
+    inventoryDays: days(end.inventory, lines.costOfSales.total),
+    bondsToEquity: id === 'US' ? end.bonds / end.equity : null,
+  }
+}
+
+const sheetCache = new WeakMap()
+
+/**
+ * Each legal entity's balance sheet at the start of the year (index 0) and at the end of every
+ * month (1 to 12), for the budget and the actuals, in USD thousands.
+ * - Receivables and payables follow the payment terms: two months of third-party sales and
+ *   purchases are open, and one month of those with group companies. Last November and
+ *   December are taken to look like the budgeted January. A balance that turns negative,
+ *   such as a credit note larger than a month's sales, is shown on the other side.
+ * - Inventory is the stock the entity owns, at the value it is carried at.
+ * - Fixed assets are cost less accumulated depreciation, with no additions in the year.
+ * - Income tax is accrued on the year to date and paid after the year end. It starts at zero.
+ * - The US parent's bonds are fixed. Interest is paid as it falls due.
+ * - Cash starts at about a month of budgeted revenue. It then moves with profit before tax,
+ *   depreciation, and the changes in receivables, inventory and payables.
+ * - Equity is what is left at the start of the year, plus profit after tax.
+ */
+export function balanceSheets(config, year) {
+  const cached = sheetCache.get(year)
+  if (cached) return cached
+  const { budget, actual } = year
+  const flowsOf = month => {
+    const flows = Object.fromEntries(ALL_COMPANIES.map(id => [id, { thirdPartySales: 0, clearing: 0, relatedSales: 0, relatedPurchases: 0 }]))
+    for (const { entity, account, debit, credit } of month.journal) {
+      const flow = flows[entity]
+      if (account === 'externalRevenue') flow.thirdPartySales -= debit - credit
+      else if (account === 'externalClearing') flow.clearing += debit - credit
+      else if (account === 'intercompanyReceivable') flow.relatedSales += debit - credit
+      else if (account === 'intercompanyPayable') flow.relatedPurchases -= debit - credit
+    }
+    for (const id of ALL_COMPANIES) {
+      const flow = flows[id]
+      // Outsiders are paid for what was bought from them. Depreciation is inside the costs but is not paid to anyone.
+      flow.thirdPartyPurchases = flow.thirdPartySales - flow.clearing - depreciationOf(id)
+    }
+    return flows
+  }
+  // Last November and December, for the balances open at the start of the year.
+  const before = flowsOf(budget[0])
+  const openingCash = Object.fromEntries(ALL_COMPANIES.map(id => [id,
+    Math.round(sum(budget.map(month => month.entities[id].revenue)) * OPENING_CASH_MONTHS / 12 / 1000) * 1000]))
+  const sheetsFor = months => {
+    const flows = months.map(flowsOf)
+    const flowAt = index => index >= 1 ? flows[index - 1] : before
+    // The flows of the `count` months up to and including month `index`.
+    const open = (index, count, id, key) => sum(Array.from({ length: count }, (_, back) => flowAt(index - back)[id][key]))
+    const inventoryAt = (index, id) => {
+      const [bins, key] = index ? [months[index - 1].inventory, 'closing'] : [months[0].inventory, 'opening']
+      return sum(bins.filter(bin => bin.owner === id).map(bin => valueOf(bin[key], 'unitValue')))
+    }
+    const taxes = Array.from({ length: 13 }, (_, index) => index
+      ? taxFor(config, months.slice(0, index), index === 12 ? months[11].stat ?? null : null).entities
+      : null)
+    let opening = null
+    return Array.from({ length: 13 }, (_, index) => {
+      const sheets = Object.fromEntries(ALL_COMPANIES.map(id => {
+        const thirdParty = open(index, PAYMENT_TERMS.thirdParty.months, id, 'thirdPartySales')
+        const related = open(index, PAYMENT_TERMS.related.months, id, 'relatedSales')
+        const owedThirdParty = open(index, PAYMENT_TERMS.thirdParty.months, id, 'thirdPartyPurchases')
+        const owedRelated = open(index, PAYMENT_TERMS.related.months, id, 'relatedPurchases')
+        const receivables = {
+          thirdParty: Math.max(0, thirdParty) + Math.max(0, -owedThirdParty),
+          related: Math.max(0, related) + Math.max(0, -owedRelated),
+        }
+        const payables = {
+          thirdParty: Math.max(0, owedThirdParty) + Math.max(0, -thirdParty),
+          related: Math.max(0, owedRelated) + Math.max(0, -related),
+        }
+        receivables.total = receivables.thirdParty + receivables.related
+        payables.total = payables.thirdParty + payables.related
+        const inventory = inventoryAt(index, id)
+        const fixedAssets = Object.fromEntries(Object.keys(FIXED_ASSET_CLASSES).filter(kind => FIXED_ASSETS[id]?.[kind]).map(kind => {
+          const { cost, net } = FIXED_ASSETS[id][kind]
+          const depreciated = cost - net + monthlyDepreciation(id, kind) * index
+          return [kind, { cost, depreciated, net: cost - depreciated }]
+        }))
+        fixedAssets.net = sum(Object.values(fixedAssets).map(asset => asset.net))
+        const profitBeforeTax = sum(months.slice(0, index).map(month => month.entities[id].operatingProfit)) - (id === 'US' ? bondInterest(index) : 0)
+        const taxPayable = index ? taxes[index][id]?.tax ?? 0 : 0
+        const bonds = id === 'US' ? US_BONDS.amount : 0
+        // Cash moves with profit before tax and depreciation, less what is tied up in working capital.
+        const workingCapital = receivables.total + inventory - payables.total
+        const cash = index
+          ? opening[id].cash + profitBeforeTax + depreciationOf(id) * index - (workingCapital - opening[id].workingCapital)
+          : openingCash[id]
+        const assets = cash + receivables.total + inventory + fixedAssets.net
+        const liabilities = payables.total + taxPayable + bonds
+        const equity = index ? opening[id].equity + profitBeforeTax - taxPayable : assets - liabilities
+        return [id, {
+          cash, receivables, inventory, fixedAssets, assets, payables, taxPayable, bonds, liabilities, equity,
+          liabilitiesAndEquity: liabilities + equity, workingCapital, profitBeforeTax, months: index,
+        }]
+      }))
+      if (!index) opening = sheets
+      return sheets
+    })
+  }
+  const result = { budget: sheetsFor(budget), actual: sheetsFor(actual) }
+  sheetCache.set(year, result)
+  return result
 }
 
 /**

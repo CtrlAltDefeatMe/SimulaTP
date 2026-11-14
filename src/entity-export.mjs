@@ -3,8 +3,8 @@
 // the amounts as numbers. Beside each Amount column a Formula column works the amount out again from
 // units, values per unit, other lines and the named rates on the Parameters sheet, so a reader can
 // see how each line is built and trace it to its inputs. Lines with no formula are the model's inputs.
-import { ENTITIES, PRODUCTS, US_TAX_RULES, entityDetail, reportParameters } from './engine.mjs';
-import { buildRows, buildTaxRows, reportLabels } from './entity-view.mjs';
+import { ENTITIES, FIXED_ASSET_CLASSES, FIXED_ASSETS, PAYMENT_TERMS, PRODUCTS, US_BONDS, US_TAX_RULES, entityDetail, reportParameters } from './engine.mjs';
+import { balanceDate, buildBalanceRows, buildRows, buildTaxRows, reportLabels } from './entity-view.mjs';
 import { columnName, sheetName, xlsxWorkbook } from './xlsx.mjs';
 
 export const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -71,6 +71,14 @@ function parameterList(config) {
     { name: 'Markup_RD_Services', text: 'Markup on the R&D services Germany and Poland provide the United States', value: rates.rdMarkup },
     { name: 'Margin_Belgian_Warehouse', text: 'Margin the Belgian warehouse earns, as a share of its fee', value: rates.belgiumMargin },
     ...Object.entries(rates.indiaShares).map(([id, value]) => ({ name: `India_Share_${id}`, text: `Share of India’s service fee charged to ${id === 'US' ? 'the United States' : ENTITIES[id].name}`, value })),
+    { section: 'Fixed assets: useful life in years, depreciated straight line on cost' },
+    ...Object.entries(FIXED_ASSETS).flatMap(([id, assets]) => Object.entries(assets).map(([kind, asset]) => ({
+      name: `Life_${id}_${kind === 'buildings' ? 'Buildings' : 'Equipment'}`, text: `${ENTITIES[id].name}: ${FIXED_ASSET_CLASSES[kind].toLowerCase()}`, value: asset.life, format: 'whole',
+    }))),
+    { section: 'Financing and payment terms' },
+    { name: 'Rate_Bond_Interest', text: 'Coupon on the US parent’s bonds, held by outside investors', value: US_BONDS.rate },
+    { name: 'Days_Third_Party', text: 'Payment terms with customers and suppliers, days', value: PAYMENT_TERMS.thirdParty.days, format: 'whole' },
+    { name: 'Days_Group', text: 'Payment terms between group companies, days', value: PAYMENT_TERMS.related.days, format: 'whole' },
     { section: 'Customs duty, on the declared transfer price, by importing block, where the goods were made and product line' },
   ];
   for (const [lane, products] of Object.entries(rates.dutyRates)) {
@@ -114,6 +122,10 @@ function layout(detail, blocks) {
     add('row', row);
     if (row.type === 'layer' && SIDES.some(name => duty(row[name]))) add('duty', row, { duty });
   }
+  // The balance sheet: start of the period in the Units column, end in the Amount column.
+  add('blank');
+  add('header');
+  for (const row of buildBalanceRows(detail)) add('row', row);
   const tax = buildTaxRows(detail);
   if (tax.length) {
     add('blank');
@@ -179,6 +191,8 @@ function helpers(sheet, side, line, sheets) {
     a: key => at(sheet, key) ? `${columns.amount}${at(sheet, key).number}` : '0',
     u: key => at(sheet, key) ? `${columns.units}${at(sheet, key).number}` : '0',
     e: key => at(sheet, key) ? `${columns.each}${at(sheet, key).number}` : '0',
+    // A balance at the start of the period, in the Units column of a balance sheet line.
+    s: key => at(sheet, key) ? `${columns.units}${at(sheet, key).number}` : '0',
     sum: list => {
       const parts = compact(keys(sheet, list));
       return !parts.length ? '0' : parts.length === 1 && !parts[0].includes(':') ? parts[0] : `SUM(${parts.join(',')})`;
@@ -213,6 +227,14 @@ function sideCells(line, side, sheet, sheets) {
   const formula = formulaFor(sheet, line, side, sheets);
   const result = formula ? { formula, style: { ...formulaLook, format: kind === 'percent' ? 'percent' : 'whole' } } : cell(undefined, formulaLook);
   if (kind === 'percent') return [number(), number(), cell(values.amount, { ...look, format: 'percent' }), result];
+  if (kind === 'times' || kind === 'days') {
+    const format = kind === 'times' ? 'cents' : 'whole';
+    return [number(), number(), cell(values.amount, { ...look, format }), formula ? { formula, style: { ...formulaLook, format } } : result];
+  }
+  if (kind === 'balance') {
+    const at = value => value === undefined ? number() : cell(value, { ...look, format: 'whole' });
+    return [at(values.start), number(), at(values.end), result];
+  }
   const units = values.units === undefined ? number() : cell(values.units, { ...look, format: 'whole' });
   const each = values.units && values.amount !== undefined ? cell(values.amount / values.units, { ...look, format: 'cents' }) : number();
   const amount = values.amount === undefined ? number() : cell(values.amount, { ...look, format: 'whole' });
@@ -250,6 +272,14 @@ function entitySheet(sheet, sheets) {
   for (const line of sheet.lines) {
     const { row } = line;
     if (line.kind === 'blank') rows.push([]);
+    else if (line.kind === 'header') {
+      const dates = name => [detail[name].balance.start, detail[name].balance.end].map(balanceDate);
+      const head = (text, index) => cell(text, index === 3 ? { ...style.header, fill: 'E3ECF8' } : style.header);
+      rows.push([cell('Balance sheet · USD thousands', style.headerLeft), ...SIDES.flatMap(name => {
+        const [start, end] = dates(name);
+        return [`Start: ${start}`, '', `End: ${end}`, 'Formula, end'].map(head);
+      })]);
+    }
     else if (line.kind === 'duty') {
       rows.push([cell('of which customs duty', { ...looks.layer.label, indent: 3 }), ...dutyCells(line, 0, sheet), ...dutyCells(line, 1, sheet)]);
     } else if (row.type === 'heading') rows.push([cell(row.text, style.heading), ...Array.from({ length: width - 1 }, () => cell(undefined, style.heading))]);
@@ -284,21 +314,24 @@ function contentsSheet(details, { exported }) {
     [cell(`Exported ${exported}. Amounts are in USD thousands and units in thousands, so a value per unit is in US dollars. Amounts are kept unrounded; the cells show whole thousands.`, style.subtitle)],
     [cell(closed ? `Actual quarters revealed: Q1${closed > 1 ? `–Q${closed}` : ''} 2027.` : 'No actual quarters revealed yet: the actual columns show zero.', style.subtitle)],
     [],
-    [cell('Entity', style.headerLeft), cell('Role', style.headerLeft), cell(`Operating profit · ${budgetLabel}`, style.header), cell(`Operating profit · ${actualLabel}`, style.header)],
+    [cell('Entity', style.headerLeft), cell('Role', style.headerLeft), cell(`Operating profit · ${budgetLabel}`, style.header), cell(`Operating profit · ${actualLabel}`, style.header),
+      cell('Return on assets · budget', style.header), cell('Return on assets · actual', style.header)],
   ];
   const links = [];
   for (const detail of details) {
     const entity = ENTITIES[detail.id];
     links.push({ ref: `A${rows.length + 1}`, sheet: sheetName(entity.name) });
-    rows.push([cell(entity.name, style.link), cell(entity.role), cell(detail.budget.operatingProfit, { format: 'whole' }), cell(detail.actual.operatingProfit, { format: 'whole' })]);
+    const roa = side => side.ratios ? cell(side.ratios.returnOnAssets, { format: 'percent' }) : null;
+    rows.push([cell(entity.name, style.link), cell(entity.role), cell(detail.budget.operatingProfit, { format: 'whole' }), cell(detail.actual.operatingProfit, { format: 'whole' }),
+      roa(detail.budget), roa(detail.actual)]);
   }
   links.push({ ref: `A${rows.length + 1}`, sheet: 'Parameters' });
-  rows.push([cell('Parameters', style.link), cell('Tax, royalty, service and duty rates')]);
+  rows.push([cell('Parameters', style.link), cell('Tax, royalty, service and duty rates, asset lives, the bond coupon and payment terms')]);
   rows.push([],
-    [cell('Each entity sheet lists the same lines as the Entity detail page: net sales by buyer, cost of sales with the FIFO stock layers behind it, operating expenses, the result and inventory. The United States sheet ends with the US income tax computation.', style.subtitle)],
+    [cell('Each entity sheet lists the same lines as the Entity detail page: net sales by buyer, cost of sales with the FIFO stock layers behind it, operating expenses with depreciation, the result to profit after tax and inventory. Then the balance sheet, with the start of the period in the Units column and the end in the Amount column, and the ratios for the period. The United States sheet ends with the US income tax computation.', style.subtitle)],
     [cell('Beside each Amount column, a Formula column works the amount out again: units times the value per unit, the sum of the lines or layers it is made of, duty as the value before duty times the duty rate, ending stock as beginning stock plus goods received less cost of sales, and fees, royalty and tax from the lines and rates they are set from, on the same sheet or another.', style.subtitle)],
     [cell('A blank Formula cell marks an input: a cost, a fee set on the Transfer prices page, or an adjustment. A formula result that differs from its amount by $500 or more turns red, for example after a value is changed.', style.subtitle)]);
-  return { name: 'Contents', columns: [34, 30, 22, 22], rows, freeze: { rows: 6 }, links };
+  return { name: 'Contents', columns: [34, 30, 22, 22, 16, 16], rows, freeze: { rows: 6 }, links };
 }
 
 // The workbook and its file name, for the period shown on the page.
