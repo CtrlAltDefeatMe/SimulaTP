@@ -298,7 +298,8 @@ test('demand for a line made in one plant goes unmet once that plant is at its l
   const base = createConfig()
   const baseline = runYear(base).budget
   const units = lots => lots.reduce((sum, lot) => sum + lot.quantity, 0)
-  for (const [plant, family, limit, hub, other] of [['US', 'B', 1300, 'US', 'BE'], ['PL', 'C', 700, 'BE', 'US']]) {
+  // The Swiss warehouse also holds the limited-risk distributors' stock, so Poland's limit must be lower to run it out.
+  for (const [plant, family, limit, hub, other] of [['US', 'B', 1300, 'US', 'BE'], ['PL', 'C', 650, 'BE', 'US']]) {
     const config = { ...base, capacity: structuredClone(base.capacity) }
     config.capacity[plant][family] = limit
     const { budget, actual } = runYear(config)
@@ -336,10 +337,23 @@ test('a saved scenario that has not started takes the current default margin, an
   assert.equal(upgradeConfig({ ...structuredClone(saved), annualOperatingMargin: 0.25 }, false).annualOperatingMargin, 0.25)
 })
 
-test('a price change reaches a distributor\'s cost of sales only after its two months of stock are sold', () => {
+test('a price change reaches a full-fledged distributor\'s cost of sales only after its two months of stock are sold', () => {
   const config = createConfig()
   const base = runYear(config)
-  for (const [id, route] of [['DE', 'CH-DE'], ['FR', 'CH-FR'], ['UK', 'CH-UK'], ['APAC', 'CH-APAC'], ['CA', 'US-CA']]) {
+  // The limited-risk distributors hold no stock: the Swiss principal ships each order from its Belgian
+  // warehouse and sells it to them as it ships, so a new price reaches their cost of sales at once.
+  for (const [id, route] of [['DE', 'CH-DE'], ['FR', 'CH-FR'], ['UK', 'CH-UK']]) {
+    assert.ok(base.actual.every(month => month.inventory.filter(bin => bin.owner === id)
+      .every(bin => !bin.opening.length && !bin.closing.length)), id)
+    const current = reviewGoodsPricing(config, 3).routes.find(entry => entry.key === route).prices
+    const raised = Object.fromEntries(current.map(price => [price.product, cents(price.applied * 1.1)]))
+    const changed = runYear(applyGoodsPrices(config, 3, { [route]: raised }))
+    // The raised prices are rounded to the cent, so the rise is 10% to within a hundredth of a percent.
+    for (const month of [3, 4, 8]) {
+      assert.ok(Math.abs(changed.actual[month].entities[id].cogs / base.actual[month].entities[id].cogs - 1.1) < 1e-4, id)
+    }
+  }
+  for (const [id, route] of [['APAC', 'CH-APAC'], ['CA', 'US-CA']]) {
     // A distributor starts every month holding about two months of normal demand, bought at earlier prices.
     for (const family of Object.keys(PRODUCTS)) {
       const bin = base.actual[3].inventory.find(entry => entry.owner === id && entry.product === family)
@@ -909,24 +923,32 @@ test('the entity detail report shows service fees, the royalty and stock the way
 
   // The annual view sets the full-year budget beside actuals to date.
   const units = lines => lines.sales.reduce((sum, group) => sum + Object.values(group.products).reduce((count, line) => count + line.units, 0), 0)
-  const germany = report('DE', { basis: 'year', revealed: 3 })
-  assert.equal(germany.budget.months, 12)
-  assert.equal(germany.actual.months, 3)
-  assert.equal(units(germany.actual), [0, 1, 2].reduce((sum, period) => sum + units(report('DE', { basis: 'month', period, revealed: 3 }).actual), 0))
-  assert.deepEqual(germany.actual.inventory.closing, report('DE', { basis: 'month', period: 2, revealed: 3 }).actual.inventory.closing)
-  assert.deepEqual(germany.actual.inventory.opening, germany.budget.inventory.opening)
+  const asia = report('APAC', { basis: 'year', revealed: 3 })
+  assert.equal(asia.budget.months, 12)
+  assert.equal(asia.actual.months, 3)
+  assert.equal(units(asia.actual), [0, 1, 2].reduce((sum, period) => sum + units(report('APAC', { basis: 'month', period, revealed: 3 }).actual), 0))
+  assert.deepEqual(asia.actual.inventory.closing, report('APAC', { basis: 'month', period: 2, revealed: 3 }).actual.inventory.closing)
+  assert.deepEqual(asia.actual.inventory.opening, asia.budget.inventory.opening)
 
   // Stock is a balance. Before the year starts both ends are the opening stock. An unrevealed month has no ending stock yet.
-  const start = report('DE', { basis: 'year', revealed: 0 }).actual
+  const start = report('APAC', { basis: 'year', revealed: 0 }).actual
   assert.equal(start.revenue, 0)
   assert.deepEqual(start.inventory.closing, start.inventory.opening)
   assert.ok(start.inventory.opening.every(row => row.units > 0))
-  const next = report('DE', { basis: 'month', period: 3, revealed: 3 }).actual.inventory
-  assert.deepEqual(next.opening, germany.actual.inventory.closing)
+  const next = report('APAC', { basis: 'month', period: 3, revealed: 3 }).actual.inventory
+  assert.deepEqual(next.opening, asia.actual.inventory.closing)
   assert.equal(next.closing, null)
-  assert.deepEqual(report('DE', { basis: 'month', period: 5, revealed: 3 }).actual.inventory, { opening: null, closing: null })
-  // The service entities and the toll manufacturer hold no stock.
+  assert.deepEqual(report('APAC', { basis: 'month', period: 5, revealed: 3 }).actual.inventory, { opening: null, closing: null })
+  // The service entities and the toll manufacturer hold no stock. Nor do the limited-risk distributors:
+  // what they sell is shipped from the Swiss principal's stock and bought as it ships.
   for (const id of ['PL', 'BE', 'IN']) assert.deepEqual(report(id, { basis: 'year', revealed: 12 }).budget.inventory, { opening: [], closing: [] })
+  for (const id of ['DE', 'FR', 'UK']) {
+    const { budget, actual } = report(id, { basis: 'year', revealed: 12 })
+    for (const side of [budget, actual]) {
+      assert.ok([...side.inventory.opening, ...side.inventory.closing].every(row => row.units === 0), id)
+      for (const family of Object.keys(PRODUCTS)) assert.equal(side.received[family].units, side.costOfSales.products[family].units, id)
+    }
+  }
   assert.deepEqual(Object.keys(report('PL', { basis: 'month', period: 0, revealed: 1 }).actual.made), Object.keys(PRODUCTS))
 
   assert.throws(() => report('UNRELATED'), /legal entities/)
@@ -962,36 +984,44 @@ test('the entity detail report lists cost of sales and stock by first-in, first-
     }
   }
 
-  // Germany opens with two layers of Precision Components. January sells out of the older, cheaper one,
-  // so its cost per unit is below the average value of the stock it started with.
-  const january = entityDetail(config, year, 'DE', { basis: 'month', period: 0, revealed: 0 }).budget
+  // Asia, a full-fledged distributor, opens with two layers of Precision Components. January sells out of the
+  // older, cheaper one, so its cost per unit is below the average value of the stock it started with.
+  // Its layers carry the import duty: Asia is outside the European customs block.
+  const duty = 1 + config.customs.rates['APAC.EU'].A
+  const january = entityDetail(config, year, 'APAC', { basis: 'month', period: 0, revealed: 0 }).budget
   const opening = january.inventory.opening.find(row => row.product === 'A')
-  assert.deepEqual(opening.layers.map(layer => [layer.vintage, layer.source, layer.units]), [['2026-11', 'bought', 360], ['2026-12', 'bought', 360]])
+  assert.deepEqual(opening.layers.map(layer => [layer.vintage, layer.source, layer.units]), [['2026-11', 'bought', 430], ['2026-12', 'bought', 430]])
   const [older, newer] = each(opening.layers)
   assert.ok(older < newer)
   const sold = january.costOfSales.products.A
   assert.deepEqual(sold.layers.map(layer => layer.vintage), ['2026-11'])
   assert.deepEqual(each(sold.layers), [older])
   assert.ok(cents(sold.amount / sold.units) < cents(opening.amount / opening.units))
-  // What it buys in January comes in at January's transfer price and is still in stock at the end of the month.
+  // What it buys in January comes in at January's transfer price plus duty and is still in stock at the end of the month.
   assert.deepEqual(january.received.A.layers.map(layer => layer.vintage), ['2027-01'])
-  const price = reviewGoodsPricing(config, 0).routes.find(route => route.key === 'CH-DE').prices.find(entry => entry.product === 'A').applied
-  assert.deepEqual(each(january.received.A.layers), [cents(price)])
+  const price = reviewGoodsPricing(config, 0).routes.find(route => route.key === 'CH-APAC').prices.find(entry => entry.product === 'A').applied
+  assert.deepEqual(each(january.received.A.layers), [cents(price * duty)])
   assert.deepEqual(january.inventory.closing.find(row => row.product === 'A').layers.map(layer => layer.vintage), ['2026-11', '2026-12', '2027-01'])
 
   // A price raised at the March review shows in April's purchases at once, and in cost of sales only when that layer is reached.
-  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices
+  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-APAC').prices
   const raised = Object.fromEntries(current.map(entry => [entry.product, cents(entry.applied * 1.1)]))
-  const changedConfig = applyGoodsPrices(config, 3, { 'CH-DE': raised })
+  const changedConfig = applyGoodsPrices(config, 3, { 'CH-APAC': raised })
   const changed = runYear(changedConfig)
-  const month = period => entityDetail(changedConfig, changed, 'DE', { basis: 'month', period, revealed: 12 }).actual
-  assert.deepEqual(each(month(3).received.A.layers), [raised.A])
+  const month = period => entityDetail(changedConfig, changed, 'APAC', { basis: 'month', period, revealed: 12 }).actual
+  assert.deepEqual(each(month(3).received.A.layers), [cents(raised.A * duty)])
   assert.ok(month(3).costOfSales.products.A.layers.every(layer => layer.vintage < '2027-04'))
-  assert.ok(month(5).costOfSales.products.A.layers.some(layer => layer.vintage === '2027-04' && cents(layer.amount / layer.units) === raised.A))
+  assert.ok(month(5).costOfSales.products.A.layers.some(layer => layer.vintage === '2027-04' && cents(layer.amount / layer.units) === cents(raised.A * duty)))
   // The budget keeps the opening price, so the same layer shows both prices side by side.
-  const april = entityDetail(changedConfig, changed, 'DE', { basis: 'month', period: 3, revealed: 12 })
+  const april = entityDetail(changedConfig, changed, 'APAC', { basis: 'month', period: 3, revealed: 12 })
   assert.deepEqual(april.budget.received.A.layers.map(layer => layer.key), april.actual.received.A.layers.map(layer => layer.key))
-  assert.ok(each(april.budget.received.A.layers)[0] < raised.A)
+  assert.ok(each(april.budget.received.A.layers)[0] < cents(raised.A * duty))
+  // A limited-risk distributor buys as the goods ship to its customer, so a new price is its cost of sales at once.
+  const germanConfig = applyGoodsPrices(config, 3, { 'CH-DE': Object.fromEntries(reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices
+    .map(entry => [entry.product, cents(entry.applied * 1.1)])) })
+  const germanApril = entityDetail(germanConfig, runYear(germanConfig), 'DE', { basis: 'month', period: 3, revealed: 12 }).actual
+  assert.deepEqual(germanApril.costOfSales.products.A.layers.map(layer => layer.vintage), ['2027-04'])
+  assert.deepEqual(each(germanApril.costOfSales.products.A.layers), each(germanApril.received.A.layers))
 
   // An importer in another customs block carries the duty inside the layer's value.
   const asia = entityDetail(config, year, 'APAC', { basis: 'month', period: 2, revealed: 12 }).actual.received.A.layers
@@ -1116,8 +1146,8 @@ test('the entity detail report works by quarter and lists a quarter bought at on
     }
   }
 
-  // Germany pays one price all quarter, so each quarter's purchases are one layer. Its opening stock was bought at two prices.
-  const first = report('DE', { period: 0, revealed: 3 })
+  // Asia pays one price all quarter, so each quarter's purchases are one layer. Its opening stock was bought at two prices.
+  const first = report('APAC', { period: 0, revealed: 3 })
   for (const side of [first.budget, first.actual]) {
     assert.deepEqual(side.inventory.opening.find(row => row.product === 'A').layers.map(layer => layer.vintage), ['2026-11', '2026-12'])
     assert.deepEqual(side.received.A.layers.map(layer => [layer.vintage, layer.quarter]), [['2027-Q1', true]])
@@ -1127,30 +1157,36 @@ test('the entity detail report works by quarter and lists a quarter bought at on
   // The budget and the actuals list the same layers, so they share a row.
   assert.deepEqual(first.budget.costOfSales.products.A.layers.map(layer => layer.key), first.actual.costOfSales.products.A.layers.map(layer => layer.key))
 
+  // Germany holds no stock: each quarter it buys what it sells, as one layer at the quarter's price.
+  const german = report('DE', { period: 0, revealed: 3 }).actual
+  assert.deepEqual(german.costOfSales.products.A.layers.map(layer => layer.vintage), ['2027-Q1'])
+  assert.ok(german.inventory.closing.every(row => !row.units))
+
   // A quarter is zero until all three of its months are revealed. The next one to be revealed shows its opening stock.
-  const waiting = report('DE', { period: 1, revealed: 3 }).actual
+  const waiting = report('APAC', { period: 1, revealed: 3 }).actual
   assert.equal(waiting.revenue, 0)
   assert.deepEqual(waiting.inventory.opening, first.actual.inventory.closing)
   assert.equal(waiting.inventory.closing, null)
-  assert.equal(report('DE', { period: 1, revealed: 5 }).actual.revenue, 0)
-  assert.deepEqual(report('DE', { period: 2, revealed: 3 }).actual.inventory, { opening: null, closing: null })
-  assert.ok(report('DE', { period: 1, revealed: 6 }).actual.revenue > 0)
+  assert.equal(report('APAC', { period: 1, revealed: 5 }).actual.revenue, 0)
+  assert.deepEqual(report('APAC', { period: 2, revealed: 3 }).actual.inventory, { opening: null, closing: null })
+  assert.ok(report('APAC', { period: 1, revealed: 6 }).actual.revenue > 0)
 
   // A price raised at the first-quarter review is the second quarter's layer, beside the budgeted price.
   // About two-thirds of that quarter's units still come from the older layer.
-  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-DE').prices
+  const duty = 1 + config.customs.rates['APAC.EU'].A
+  const current = reviewGoodsPricing(config, 3).routes.find(route => route.key === 'CH-APAC').prices
   const raised = Object.fromEntries(current.map(entry => [entry.product, cents(entry.applied * 1.1)]))
-  const changedConfig = applyGoodsPrices(config, 3, { 'CH-DE': raised })
+  const changedConfig = applyGoodsPrices(config, 3, { 'CH-APAC': raised })
   const changed = runYear(changedConfig)
-  const second = entityDetail(changedConfig, changed, 'DE', { basis: 'quarter', period: 1, revealed: 6, layers: 'quarter' })
-  assert.deepEqual(each(second.actual.received.A.layers), [raised.A])
-  assert.ok(each(second.budget.received.A.layers)[0] < raised.A)
+  const second = entityDetail(changedConfig, changed, 'APAC', { basis: 'quarter', period: 1, revealed: 6, layers: 'quarter' })
+  assert.deepEqual(each(second.actual.received.A.layers), [cents(raised.A * duty)])
+  assert.ok(each(second.budget.received.A.layers)[0] < cents(raised.A * duty))
   assert.deepEqual(second.actual.received.A.layers.map(layer => layer.key), second.budget.received.A.layers.map(layer => layer.key))
   const sold = second.actual.costOfSales.products.A
   const atNewPrice = sold.layers.find(layer => layer.vintage === '2027-Q2').units / sold.units
   assert.ok(atNewPrice > 0.25 && atNewPrice < 0.45, String(atNewPrice))
-  const third = entityDetail(changedConfig, changed, 'DE', { basis: 'quarter', period: 2, revealed: 9, layers: 'quarter' })
-  assert.ok(third.actual.costOfSales.products.A.layers.every(layer => cents(layer.amount / layer.units) === raised.A))
+  const third = entityDetail(changedConfig, changed, 'APAC', { basis: 'quarter', period: 2, revealed: 9, layers: 'quarter' })
+  assert.ok(third.actual.costOfSales.products.A.layers.every(layer => cents(layer.amount / layer.units) === cents(raised.A * duty)))
 
   // The plants' cost moves every month, so their layers stay by month.
   const us = report('US', { period: 1, revealed: 12 }).actual.received
@@ -1158,7 +1194,7 @@ test('the entity detail report works by quarter and lists a quarter bought at on
   // What it buys from Switzerland comes at one price all quarter, so that is one layer.
   assert.deepEqual(us.C.layers.map(layer => [layer.source, layer.vintage]), [['bought', '2027-Q2']])
   // By month, the same report keeps a layer for every month.
-  assert.deepEqual(entityDetail(config, year, 'DE', { basis: 'quarter', period: 0, revealed: 3 }).actual.received.A.layers.map(layer => layer.vintage), ['2027-01', '2027-02', '2027-03'])
+  assert.deepEqual(entityDetail(config, year, 'APAC', { basis: 'quarter', period: 0, revealed: 3 }).actual.received.A.layers.map(layer => layer.vintage), ['2027-01', '2027-02', '2027-03'])
 })
 
 test('a service fee quoted by the quarter is charged a third each month', () => {

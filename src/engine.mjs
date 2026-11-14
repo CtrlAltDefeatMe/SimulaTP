@@ -70,6 +70,13 @@ const plantFor = (family, hub) => makes(HUB_PLANT[hub], family) ? HUB_PLANT[hub]
 // Whether a hub makes a line itself or buys it from the other hub.
 const hubMakes = (hub, family) => makes(HUB_PLANT[hub], family)
 const LRD = new Set(['DE', 'FR', 'UK'])
+// Months of their own base demand the distributors hold in stock. The limited-risk
+// distributors hold none: the Swiss principal keeps their stock in the Belgian warehouse
+// and ships each order straight to the customer, selling to the distributor as it ships.
+// It holds the two months the distributors would otherwise keep, on top of its own stock.
+const DISTRIBUTOR_STOCK_MONTHS = { lrd: 0, ffd: 2 }
+const PRINCIPAL_LRD_STOCK_MONTHS = 2
+const stockMonths = id => DISTRIBUTOR_STOCK_MONTHS[LRD.has(id) ? 'lrd' : 'ffd']
 const ALL_COMPANIES = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)
 // Poland and India charge a fixed monthly fee and are tested on their markup on cost.
 const SERVICE_PROVIDERS = ['PL', 'IN']
@@ -91,11 +98,12 @@ const ZERO_SHOCK = { demand: 0, salesPrice: 0, materialCost: 0 }
 const DEFAULT_RD_RATE = 0.04
 // The default budget before R&D, less R&D at its default share of sales. Keeping the
 // target equal to the uncalibrated budget leaves the base unit costs unscaled.
-const DEFAULT_ANNUAL_MARGIN = 2_281_724.4253404764 / 10_487_570 - DEFAULT_RD_RATE
-// Defaults of earlier versions: before each product line was given its own plant, before
-// plant capacity was cut to about a normal month's output, before customs duty entered
-// cost of sales, and before unit costs and operating expenses were raised.
-const PREVIOUS_DEFAULT_MARGINS = [2_282_638.939772495, 2_287_230.2960874448, 2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
+const DEFAULT_ANNUAL_MARGIN = 2_279_906.539063561 / 10_487_570 - DEFAULT_RD_RATE
+// Defaults of earlier versions: before the limited-risk distributors' stock moved to the
+// Swiss principal, before each product line was given its own plant, before plant capacity
+// was cut to about a normal month's output, before customs duty entered cost of sales, and
+// before unit costs and operating expenses were raised.
+const PREVIOUS_DEFAULT_MARGINS = [2_281_724.4253404764, 2_282_638.939772495, 2_287_230.2960874448, 2_381_070.1859345874, 3_965_513.159268929, 3_980_550.8704, 4_017_544.4704]
   .map(profit => profit / 10_487_570 - DEFAULT_RD_RATE)
 // Units a month for each product line a plant makes. Each is a little above a normal
 // month's output, so a plant runs at its limit in the busier months and draws on stock.
@@ -565,7 +573,8 @@ function seedOpeningStock(costScale, config) {
   const stock = new Stock()
   for (const family of FAMILIES) {
     const product = PRODUCTS[family]
-    for (const market of DISTRIBUTORS) {
+    // The full-fledged distributors open with two months of stock. The limited-risk ones hold none.
+    for (const market of DISTRIBUTORS.filter(id => stockMonths(id))) {
       const cost = hubGroupCost(sourceOf(market), family, config, history) * costScale
       const tp = distributorLandedCost(product, market, historical)
       const bin = stock.bin(market, market, family)
@@ -582,11 +591,11 @@ function seedOpeningStock(costScale, config) {
     // Each hub opens with its usual stock. Of a line its own plant makes, that is four
     // months of its markets' demand in the Swiss warehouse and one month in the United
     // States, carried at what the plant charged. Of a line it buys from the other hub, it
-    // is one month, carried at the cross-supply price plus the duty paid on it.
-    const opening = (hub, factor, month) => {
+    // is one month, carried at the cross-supply price plus the duty paid on it. The Swiss
+    // warehouse also holds two months of the limited-risk distributors' demand.
+    const opening = (hub, factor, month, units) => {
       const material = product.material * costScale * factor
       const vintage = '2026-' + String(month).padStart(2, '0')
-      const units = sum(hubMarkets(hub).map(id => product.demand[id]))
       const origin = plannedOrigin(family, hub)
       if (hubMakes(hub, family)) {
         const group = baseGroupCost(product, HUB_PLANT[hub]) * costScale * factor
@@ -601,9 +610,14 @@ function seedOpeningStock(costScale, config) {
     }
     for (const hub of HUBS) {
       // One lot for each month of stock, the older ones bought or made a little cheaper.
-      const months = bufferMonths(hub, family)
+      const own = sum(hubMarkets(hub).map(id => product.demand[id]))
+      const lrd = hub === 'CH' ? sum([...LRD].map(id => product.demand[id])) : 0
+      const lrdMonths = hub === 'CH' ? PRINCIPAL_LRD_STOCK_MONTHS : 0
+      const months = Math.max(bufferMonths(hub, family), lrdMonths)
+      // `age` is 0 for December, 1 for November and so on.
+      const units = age => (age < bufferMonths(hub, family) ? own : 0) + (age < lrdMonths ? lrd : 0)
       stock.bin(hub, hub === 'CH' ? 'BE' : 'US', family).lots = [0.96, 0.98, 0.99, 1].slice(-months).map((factor, index) =>
-        opening(hub, factor, 12 - months + 1 + index))
+        opening(hub, factor, 12 - months + 1 + index, units(months - 1 - index)))
     }
     // Poland holds materials and work in process only for the lines it converts.
     if (!makes('PL', family)) continue
@@ -705,7 +719,9 @@ function allocate(requests, available) {
 // line its own plant makes. A line bought from the other hub is held for one month.
 const HUB_BUFFER_MONTHS = { US: 1, CH: 4 }
 const bufferMonths = (hub, family) => hubMakes(hub, family) ? HUB_BUFFER_MONTHS[hub] : 1
+// The Swiss warehouse also holds the limited-risk distributors' stock.
 const hubBuffer = (hub, family) => bufferMonths(hub, family) * sum(hubMarkets(hub).map(id => PRODUCTS[family].demand[id]))
+  + (hub === 'CH' ? PRINCIPAL_LRD_STOCK_MONTHS * sum([...LRD].map(id => PRODUCTS[family].demand[id])) : 0)
 
 // What each plant makes in the month and what the hubs ship to each other, by product line.
 // A plant cannot make more of a line than its capacity for that line. A line made in one
@@ -723,7 +739,7 @@ function monthPlan(stock, month, shocks, config) {
     const warehouse = stock.bin('CH', 'BE', family)
     const bins = { US: us, CH: warehouse }
     const orders = Object.fromEntries(DISTRIBUTORS.map(id => [
-      id, Math.max(0, demand[id] + 2 * product.demand[id] - unitsOf(stock.bin(id, id, family).lots)),
+      id, Math.max(0, demand[id] + stockMonths(id) * product.demand[id] - unitsOf(stock.bin(id, id, family).lots)),
     ]))
     // What each hub's markets want from it this month, and what it needs to receive to
     // serve them and end the month on its usual stock.
