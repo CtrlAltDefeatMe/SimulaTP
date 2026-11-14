@@ -1319,11 +1319,18 @@ test('the entity detail report carries the US tax computation for the United Sta
   // (The fourth row was once drawn with three, because Array.map passed its index as the column count.)
   for (const basis of ['quarter', 'year']) {
     const report = renderEntityDetail({ detail: entityDetail(config, year, 'US', { basis, period: 0, revealed: 12 }), entities: ['US', 'DE'] })
-    const main = report.slice(0, report.indexOf('entity-tax-table'))
+    const main = report.slice(0, report.indexOf('entity-balance-table'))
     const lines = [...main.matchAll(/<tr class="entity-(?:line|subtotal|total|layer)">([\s\S]*?)<\/tr>/g)]
     assert.ok(lines.length > 20)
     for (const [, cells] of lines) assert.equal((cells.match(/<td>/g) ?? []).length, 6, cells.slice(0, 120))
     assert.ok(![...main.slice(main.indexOf('<tbody>')).matchAll(/colspan="(\d+)"/g)].some(([, span]) => span !== '7'))
+    // The balance sheet has a start and an end on each side.
+    const balance = report.slice(report.indexOf('entity-balance-table'), report.indexOf('entity-tax-table'))
+    const balances = [...balance.matchAll(/<tr class="entity-(?:line|subtotal|total)">([\s\S]*?)<\/tr>/g)]
+    assert.ok(balances.length > 15)
+    for (const [, cells] of balances) assert.equal((cells.match(/<td>/g) ?? []).length, 4, cells.slice(0, 120))
+    assert.ok(![...balance.slice(balance.indexOf('<tbody>')).matchAll(/colspan="(\d+)"/g)].some(([, span]) => span !== '5'))
+    assert.ok(balance.includes('Total liabilities and equity') && balance.includes('Return on assets'))
   }
   // The computation has its own table with one amount column a side, so it reads on a phone.
   const page = renderEntityDetail({ detail: us, entities: ['US', 'DE'] })

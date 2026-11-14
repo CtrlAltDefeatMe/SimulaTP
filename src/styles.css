@@ -247,6 +247,11 @@ tbody tr:hover td, .selected-row td { background: #f4f9fe; }
 .entity-table tbody tr:last-child th { border-bottom: 0; }
 .entity-stick { display: inline-block; position: sticky; left: 20px; }
 .entity-report .panel-note { padding-top: 12px; }
+/* The balance sheet has a start and an end a side. */
+.entity-balance-table thead th { white-space: normal; }
+.entity-balance-table thead th:first-child { text-align: left; }
+.entity-balance-table th[scope="row"] { width: 44%; }
+.entity-balance-table td:nth-child(4) { border-left: 1px solid var(--border); }
 /* The US tax table has one amount column a side. */
 .entity-tax-table thead th { white-space: normal; }
 .entity-tax-table thead th:first-child { text-align: left; }
@@ -369,6 +374,8 @@ input, select {
   .entity-total th[scope="row"] { background: #f6f8fb; }
   .entity-stick { left: 13px; max-width: calc(100vw - 60px); white-space: normal; }
   .entity-tax-table th[scope="row"] { width: auto; min-width: 0; max-width: none; position: static; box-shadow: none; }
+  .entity-balance-table th[scope="row"] { width: auto; min-width: 150px; max-width: 170px; }
+  .entity-balance-table td { padding-right: 9px; padding-left: 6px; }
   .entity-tax-table td { padding-right: 11px; padding-left: 7px; }
 }
 @media (prefers-reduced-motion: reduce) {
