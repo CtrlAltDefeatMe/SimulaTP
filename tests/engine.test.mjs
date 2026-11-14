@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import {
   applyGoodsPrices, applyServiceFees, applyYearEndAdjustments, createConfig, CUSTOMS_LANES, ENTITIES, entityDetail, explainYear, goodsPriceAlerts, productLineResults, PRODUCTS, profitAllocation, quarterly, unfilledDemand,
   reviewGoodsPricing, royaltyCheck, runYear, summarizeTaxAndCustoms, TESTED_PARTIES, upgradeConfig, US_TAX_RULES, usIncomeTax,
+  balanceSheets, FIXED_ASSETS, PAYMENT_TERMS, US_BONDS,
 } from '../src/engine.mjs'
 import { renderEntityDetail } from '../src/entity-view.mjs'
 import { entityWorkbook } from '../src/entity-export.mjs'
@@ -870,7 +871,10 @@ test('the entity detail report adds up to each entity’s results, budget and ac
         const { products, adjustments, fees, other, total: costOfSales } = lines.costOfSales
         near(add(Object.values(products), line => line.amount) + adjustments + fees + other, add(results, result => result.cogs), `${label} cost of sales`)
         near(costOfSales, add(results, result => result.cogs), `${label} cost of sales total`)
-        near(add(lines.charges, line => line.amount) + lines.ownCosts + lines.ownResearch, add(results, result => result.operatingExpenses), `${label} operating expenses`)
+        // Depreciation is part of the entity's own costs, shown apart.
+        const depreciation = lines.depreciation.buildings + lines.depreciation.equipment
+        near(add(lines.charges, line => line.amount) + lines.ownCosts + depreciation + lines.ownResearch, add(results, result => result.operatingExpenses), `${label} operating expenses`)
+        near(depreciation, months.length * Object.values(FIXED_ASSETS[id]).reduce((sum, asset) => sum + asset.cost / asset.life / 12, 0), `${label} depreciation`)
         near(lines.revenue - costOfSales - lines.operatingExpenses, add(results, result => result.operatingProfit), `${label} operating profit`)
         assert.ok(lines.ownCosts > -0.005 && lines.ownResearch > -0.005, label)
         // Nothing is reported as an actual before a month is revealed.
@@ -1219,9 +1223,11 @@ test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI
   for (const [months, stat] of [[budget, null], [actual, actual[11].stat], [actual.slice(0, 6), null]]) {
     const tax = usIncomeTax(config, months, stat)
     const us = add(months, month => month.entities.US.operatingProfit)
+    // Interest on the bonds, at the coupon for the months covered. It is deductible for state and federal tax.
+    near(tax.interest, US_BONDS.amount * US_BONDS.rate * months.length / 12, 'interest')
     // State tax at the rest of the US rate, deductible for federal purposes.
     near(tax.stateRate, config.tax.rates.US - 0.21, 'state rate')
-    near(tax.state, tax.stateRate * us, 'state')
+    near(tax.state, tax.stateRate * (us - tax.interest), 'state')
     // FDDEI: R&E is not allocated, so deduction eligible income is profit before R&D, less state tax.
     near(tax.fddei.dei, us + add(months, month => month.entities.US.rdExpense) - tax.state, 'DEI')
     near(tax.fddei.receipts, add(months, month => month.entities.US.revenue), 'gross receipts')
@@ -1239,12 +1245,14 @@ test('the US parent is taxed at 21% with the FDDEI and NCTI deductions, the NCTI
     assert.ok(tax.ncti.excessCredit > 0)
     near(tax.ncti.residual, 0, 'residual')
     // Taxable income and regular tax.
-    near(tax.taxableIncome, us - tax.state + tax.ncti.amount + tax.ncti.grossUp - tax.fddei.deduction - tax.ncti.deduction, 'taxable income')
+    near(tax.taxableIncome, us - tax.interest - tax.state + tax.ncti.amount + tax.ncti.grossUp - tax.fddei.deduction - tax.ncti.deduction, 'taxable income')
     near(tax.regularTax, 0.21 * tax.taxableIncome - tax.ncti.credit, 'regular tax')
     // BEAT: the R&D services in full and India's markup are base erosion payments. India's cost is excepted.
     near(tax.beat.research, add(months, month => month.transactions.filter(line => line.policy === 'RD_SERVICES').reduce((sum, line) => sum + line.amount, 0)), 'R&D services')
     near(tax.beat.indiaMarkup, tax.beat.indiaFee - tax.beat.indiaCost, 'India markup')
     near(tax.beat.percentage, tax.beat.benefits / tax.beat.deductions, 'base erosion percentage')
+    // Interest to the outside bondholders counts among the deductions but is not a base erosion payment.
+    near(tax.beat.deductions, add(months, month => month.entities.US.operatingExpenses) + tax.interest + tax.state - tax.beat.indiaCost, 'BEAT deductions')
     // Gross receipts are in USD thousands and annualized for a part year. The parent is well above $500 million.
     near(tax.beat.grossReceipts, add(months, month => month.entities.US.revenue) * 12 / add(months, month => month.months?.length ?? 1), 'gross receipts test')
     assert.ok(tax.beat.grossReceiptsMet)
@@ -1389,4 +1397,129 @@ test('the page loads every code and style file by its fingerprint, so a reload a
   assert.equal(page, stamp(page, fingerprints()), 'index.html fingerprints are out of date')
   assert.ok(page.indexOf('type="importmap"') < page.indexOf('type="module"'), 'the import map comes before the first module')
   assert.ok(!/src="\.\/src\/[\w-]+\.mjs"/.test(page) && !/href="\.\/src\/[\w-]+\.css"/.test(page))
+})
+
+test('every entity has a balance sheet that balances, with cash that ties to collections and payments on the payment terms', () => {
+  const config = applyYearEndAdjustments(createConfig(), 12, Object.fromEntries(TESTED_PARTIES.map(id => [id, 'target'])))
+  const year = runYear(config)
+  const sheets = balanceSheets(config, year)
+  const companies = Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)
+  const near = (left, right, label, tolerance = 0.005) => assert.ok(Math.abs(left - right) < tolerance, `${label}: ${left} against ${right}`)
+  // The flows of one month from the journal, entity by entity: sales and purchases with outsiders and with group companies.
+  const flowsOf = month => Object.fromEntries(companies.map(id => {
+    const lines = month.journal.filter(line => line.entity === id)
+    const net = account => lines.filter(line => line.account === account).reduce((sum, line) => sum + line.debit - line.credit, 0)
+    const depreciation = Object.values(FIXED_ASSETS[id]).reduce((sum, asset) => sum + asset.cost / asset.life / 12, 0)
+    const thirdPartySales = -net('externalRevenue')
+    return [id, {
+      thirdPartySales, relatedSales: net('intercompanyReceivable'), relatedPurchases: -net('intercompanyPayable'),
+      thirdPartyPurchases: thirdPartySales - net('externalClearing') - depreciation,
+    }]
+  }))
+  for (const side of ['budget', 'actual']) {
+    const months = year[side]
+    const flows = [flowsOf(year.budget[0]), flowsOf(year.budget[0]), ...months.map(flowsOf)]
+    // flows[1] stands for last December and flows[0] for last November: both look like the budgeted January.
+    const at = month => flows[month + 1]
+    for (const id of companies) {
+      const opening = sheets[side][0][id]
+      let collected = 0
+      for (let month = 0; month <= 12; month++) {
+        const sheet = sheets[side][month][id]
+        const label = `${side} ${id} month ${month}`
+        near(sheet.assets, sheet.liabilities + sheet.equity, `${label} balances`)
+        assert.ok(sheet.cash > 0, label)
+        // Third parties pay in 60 days and group companies in 30. Balances that change sign sit on the other side.
+        const open = (key, count) => Array.from({ length: count }, (_, back) => at(month - back)[id][key]).reduce((sum, value) => sum + value, 0)
+        near(sheet.receivables.total - sheet.payables.total,
+          open('thirdPartySales', PAYMENT_TERMS.thirdParty.months) + open('relatedSales', PAYMENT_TERMS.related.months)
+          - open('thirdPartyPurchases', PAYMENT_TERMS.thirdParty.months) - open('relatedPurchases', PAYMENT_TERMS.related.months), `${label} terms`)
+        if (month) {
+          // Cash from what was actually collected and paid in the month, with no use of the income statement.
+          collected += at(month - 2)[id].thirdPartySales + at(month - 1)[id].relatedSales
+            - at(month - 2)[id].thirdPartyPurchases - at(month - 1)[id].relatedPurchases
+            - (id === 'US' ? US_BONDS.amount * US_BONDS.rate / 12 : 0)
+          near(sheet.cash, opening.cash + collected, `${label} cash`, 0.01)
+          // Stock on the balance sheet is the stock the entity owns.
+          const owned = months[month - 1].inventory.filter(bin => bin.owner === id)
+            .reduce((sum, bin) => sum + bin.closing.reduce((value, lot) => value + lot.quantity * lot.unitValue, 0), 0)
+          near(sheet.inventory, owned, `${label} inventory`)
+        }
+        // Income tax is accrued on the year to date and paid after the year end.
+        const taxes = month ? summarizeTaxAndCustoms(config, months.slice(0, month)).tax.entities[id].tax : 0
+        if (month < 12) near(sheet.taxPayable, taxes, `${label} tax payable`)
+      }
+      const end = sheets[side][12][id]
+      // Equity grows by profit after tax. The bonds do not move.
+      const profit = months.reduce((sum, month) => sum + month.entities[id].operatingProfit, 0) - (id === 'US' ? US_BONDS.amount * US_BONDS.rate : 0)
+      near(end.equity, opening.equity + profit - end.taxPayable, `${side} ${id} equity`)
+      near(end.bonds, opening.bonds, `${side} ${id} bonds`)
+    }
+    // What group companies owe each other nets to nothing.
+    for (let month = 0; month <= 12; month++) {
+      const all = companies.map(id => sheets[side][month][id])
+      near(all.reduce((sum, sheet) => sum + sheet.receivables.related - sheet.payables.related, 0), 0, `${side} month ${month} intercompany`)
+    }
+  }
+  // The full year's actual tax follows local statutory profit.
+  near(sheets.actual[12].DE.taxPayable, config.tax.rates.DE * year.actual[11].stat.DE.operatingProfit, 'statutory tax')
+
+  // The opening balance sheet follows the assumptions.
+  const opening = sheets.budget[0]
+  const sales = id => year.budget.reduce((sum, month) => sum + month.entities[id].revenue, 0)
+  const share = (value, id) => value / sales(id)
+  const us = FIXED_ASSETS.US
+  near(share(us.buildings.net, 'US'), 0.20, 'US land and buildings', 0.005)
+  near(share(us.buildings.cost / us.buildings.life, 'US'), 0.01, 'US buildings depreciation', 0.0005)
+  near(share(us.equipment.net, 'US'), 0.25, 'US machinery', 0.005)
+  near(share(us.equipment.cost / us.equipment.life, 'US'), 0.02, 'US machinery depreciation', 0.0005)
+  near(opening.US.bonds / opening.US.equity, 0.30, 'US bonds to equity', 0.005)
+  // Poland's plant is sized on capacity, not on its fee, so its assets are far larger than its sales.
+  assert.ok(opening.PL.fixedAssets.net > 2 * sales('PL'))
+  for (const id of ['CH', 'BE', 'DE', 'FR', 'UK', 'APAC', 'CA', 'IN']) assert.equal(FIXED_ASSETS[id].buildings, undefined, id)
+  for (const id of ['DE', 'FR', 'UK', 'APAC', 'CA']) assert.ok(share(opening[id].fixedAssets.net, id) < 0.05, id)
+  // The limited-risk distributors hold no stock; the full-fledged ones about two months of cost of sales.
+  for (const id of ['DE', 'FR', 'UK']) assert.equal(opening[id].inventory, 0, id)
+  for (const id of ['APAC', 'CA']) {
+    const cogs = year.budget.reduce((sum, month) => sum + month.entities[id].cogs, 0)
+    near(opening[id].inventory / (cogs / 12), 2, id, 0.25)
+  }
+})
+
+test('the entity report shows depreciation, interest and tax on the year-to-date basis, and its balance sheet and ratios', () => {
+  const config = createConfig()
+  const year = runYear(config)
+  const near = (left, right, label, tolerance = 0.005) => assert.ok(Math.abs(left - right) < tolerance, `${label}: ${left} against ${right}`)
+  for (const id of Object.keys(ENTITIES).filter(id => !ENTITIES[id].external)) {
+    const annual = entityDetail(config, year, id, { basis: 'year', revealed: 12 })
+    const quarters = [0, 1, 2, 3].map(period => entityDetail(config, year, id, { basis: 'quarter', period, revealed: 12 }))
+    for (const side of ['budget', 'actual']) {
+      const lines = annual[side]
+      // The quarters add up to the year, tax included, and each quarter starts where the last one ended.
+      near(quarters.reduce((sum, quarter) => sum + quarter[side].tax.total, 0), lines.tax.total, `${id} ${side} tax`)
+      near(quarters.reduce((sum, quarter) => sum + quarter[side].profitAfterTax, 0), lines.profitAfterTax, `${id} ${side} profit after tax`)
+      for (let quarter = 1; quarter < 4; quarter++) assert.deepEqual(quarters[quarter][side].balance.start, quarters[quarter - 1][side].balance.end)
+      assert.deepEqual(quarters[3][side].balance.end, lines.balance.end)
+      near(lines.balance.end.equity, lines.balance.start.equity + lines.profitAfterTax, `${id} ${side} equity`)
+      near(lines.profitBeforeTax, lines.operatingProfit - lines.interest, `${id} ${side} profit before tax`)
+      // Return on assets is operating profit over the average of total assets at the start and the end.
+      near(lines.ratios.returnOnAssets, lines.operatingProfit / ((lines.balance.start.assets + lines.balance.end.assets) / 2), `${id} ${side} ROA`, 1e-12)
+      // A quarter is annualized.
+      const q = quarters[1][side]
+      near(q.ratios.returnOnAssets, q.operatingProfit * 4 / ((q.balance.start.assets + q.balance.end.assets) / 2), `${id} ${side} quarterly ROA`, 1e-12)
+      // Outside the United States, tax for a quarter is the rate on operating profit, until the year end brings in local statutory profit.
+      if (id !== 'US') {
+        for (const quarter of side === 'actual' ? [0, 1, 2] : [0, 1, 2, 3]) near(quarters[quarter][side].tax.adjustment, 0, `${id} ${side} Q${quarter + 1} adjustment`)
+        near(lines.tax.base, config.tax.rates[id] * lines.operatingProfit, `${id} ${side} tax at the rate`)
+      }
+    }
+  }
+  // Only the United States pays interest.
+  const us = entityDetail(config, year, 'US', { basis: 'year', revealed: 12 }).budget
+  near(us.interest, US_BONDS.amount * US_BONDS.rate, 'interest')
+  near(us.tax.total, us.usTax.total, 'US tax')
+  assert.equal(entityDetail(config, year, 'DE', { basis: 'year', revealed: 12 }).budget.interest, 0)
+  // Before a quarter is revealed its actual balance sheet has no end, and no ratios.
+  const waiting = entityDetail(config, year, 'APAC', { basis: 'quarter', period: 1, revealed: 3 }).actual
+  assert.ok(waiting.balance.start && !waiting.balance.end && waiting.ratios === null && waiting.tax === null)
 })
